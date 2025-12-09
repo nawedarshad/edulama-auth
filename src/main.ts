@@ -1,16 +1,17 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import morgan from 'morgan';
+import { AppLogger } from './logger/logger';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, {
+    logger: AppLogger, // <-- THIS ENABLES WINSTON
+  });
 
-  // CORS FIX FOR WEB + MOBILE
   app.enableCors({
     origin: (origin, callback) => {
-      // Allow mobile apps (origin = null)
       if (!origin) return callback(null, true);
 
-      // Allow all local and production domains
       const allowed = [
         'http://localhost:3000',
         'http://192.168.1.5:3000',
@@ -28,7 +29,9 @@ async function bootstrap() {
     allowedHeaders: '*',
   });
 
-  // MOST IMPORTANT FOR VPS !! 🔥
+  // HTTP REQUEST LOGGER
+  app.use(morgan(':method :url :status - :response-time ms'));
+
   await app.listen(process.env.PORT || 4000, '0.0.0.0');
 }
 bootstrap();

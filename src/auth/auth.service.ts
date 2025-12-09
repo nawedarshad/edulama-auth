@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import type { Role, User } from '@prisma/client';
@@ -28,6 +28,7 @@ export class AuthService {
       role: user.role.name as UserRole,
     };
   }
+  private readonly logger = new Logger(AuthService.name);
 
   async validateUser(email: string, password: string): Promise<UserWithRole> {
     const user = await this.prisma.user.findUnique({
@@ -36,23 +37,28 @@ export class AuthService {
     });
 
     if (!user) {
+      this.logger.warn(`Login failed: User not found (${email})`);
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    // ⚠️ DEV ONLY – later replace with bcrypt
     if (user.password !== password) {
+      this.logger.warn(`Login failed: Wrong password (${email})`);
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    this.logger.log(`Login validated: ${email} (${user.role.name})`);
     return user;
   }
 
   async login(email: string, password: string) {
+    this.logger.log(`Login attempt: ${email}`);
+
     const user = await this.validateUser(email, password);
     const payload = this.toPayload(user);
 
     const accessToken = await this.jwt.signAsync(payload);
-    console.log('Login endpoint hit!');
+
+    this.logger.log(`Login success: ${email} (${user.role.name})`);
 
     return {
       user: payload,
@@ -62,8 +68,11 @@ export class AuthService {
 
   async verifyToken(token: string): Promise<AuthUserPayload> {
     try {
-      return await this.jwt.verifyAsync<AuthUserPayload>(token);
+      const decoded = await this.jwt.verifyAsync<AuthUserPayload>(token);
+      this.logger.log(`Token verification success: ${decoded.email}`);
+      return decoded;
     } catch {
+      this.logger.warn(`Token verification failed`);
       throw new UnauthorizedException('Invalid or expired token');
     }
   }

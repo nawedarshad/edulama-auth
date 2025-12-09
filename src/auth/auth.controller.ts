@@ -15,7 +15,7 @@ export class AuthController {
     private readonly auth: AuthService,
     private readonly jwt: JwtService,
   ) {
-    console.log('RUNNING JWT SECRET:', process.env.JWT_ACCESS_SECRET);
+    // console.log('RUNNING JWT SECRET:', process.env.JWT_ACCESS_SECRET);
   }
 
   @Post('login')
