@@ -7,25 +7,13 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
-import { JwtService } from '@nestjs/jwt';
 
 @Controller('auth')
 export class AuthController {
-  constructor(
-    private readonly auth: AuthService,
-    private readonly jwt: JwtService,
-  ) {
-    // console.log('RUNNING JWT SECRET:', process.env.JWT_ACCESS_SECRET);
-  }
+  constructor(private readonly auth: AuthService) {}
 
   @Post('login')
   async login(@Body() body: { email: string; password: string }) {
-    console.log(
-      'JWT SECRET USED:',
-      // internal field but handy for debugging
-      (this.jwt as any)['jwtOptionsProvider'] ?? 'NO JWT OPTIONS FOUND',
-    );
-
     return this.auth.login(body.email, body.password);
   }
 
@@ -36,9 +24,7 @@ export class AuthController {
     }
 
     const token = authHeader.split(' ')[1];
-    const user = await this.auth.verifyToken(token);
-
-    return user;
+    return this.auth.verifyToken(token);
   }
 
   @Get('health')

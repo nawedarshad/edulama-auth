@@ -16,6 +16,7 @@ async function bootstrap() {
         'http://localhost:3000',
         'http://192.168.1.5:3000',
         'http://167.71.229.252:3000',
+        'http://localhost:5002',
       ];
 
       if (allowed.includes(origin)) {

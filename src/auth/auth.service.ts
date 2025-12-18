@@ -9,56 +9,101 @@ export interface AuthUserPayload {
   id: number;
   email: string;
   role: UserRole;
-  staffProfile?: { id: number } | null; // keep for future if needed
+  permissions: string[];
 }
 
-type UserWithRole = User & { role: Role };
+type UserWithAllPermissions = User & {
+  role: Role & {
+    Role: {
+      permission: {
+        name: string;
+      };
+    }[];
+  };
+  userPermissions: {
+    permission: {
+      name: string;
+    };
+  }[];
+};
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
   ) {}
 
-  private toPayload(user: UserWithRole): AuthUserPayload {
+  /* -------- MERGE ROLE + USER PERMISSIONS -------- */
+
+  private extractPermissions(user: UserWithAllPermissions): string[] {
+    const rolePermissions =
+      user.role?.Role?.map((rp) => rp.permission.name) ?? [];
+
+    const userPermissions =
+      user.userPermissions?.map((up) => up.permission.name) ?? [];
+
+    return Array.from(new Set([...rolePermissions, ...userPermissions]));
+  }
+
+  private toPayload(user: UserWithAllPermissions): AuthUserPayload {
     return {
       id: user.id,
       email: user.email,
       role: user.role.name as UserRole,
+      permissions: this.extractPermissions(user),
     };
   }
-  private readonly logger = new Logger(AuthService.name);
 
-  async validateUser(email: string, password: string): Promise<UserWithRole> {
+  async validateUser(
+    email: string,
+    password: string,
+  ): Promise<UserWithAllPermissions> {
     const user = await this.prisma.user.findUnique({
       where: { email },
-      include: { role: true },
+      include: {
+        role: {
+          include: {
+            Role: {
+              include: {
+                permission: true,
+              },
+            },
+          },
+        },
+        userPermissions: {
+          include: {
+            permission: true,
+          },
+        },
+      },
     });
 
     if (!user) {
-      this.logger.warn(`Login failed: User not found (${email})`);
       throw new UnauthorizedException('Invalid credentials');
     }
 
     if (user.password !== password) {
-      this.logger.warn(`Login failed: Wrong password (${email})`);
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    this.logger.log(`Login validated: ${email} (${user.role.name})`);
+    if (!user.isActive) {
+      throw new UnauthorizedException('Account inactive');
+    }
+
+    this.logger.log(
+      `User validated: ${email} (${user.role.name}) | perms=${user.userPermissions.length}`,
+    );
+
     return user;
   }
 
   async login(email: string, password: string) {
-    this.logger.log(`Login attempt: ${email}`);
-
     const user = await this.validateUser(email, password);
     const payload = this.toPayload(user);
-
     const accessToken = await this.jwt.signAsync(payload);
-
-    this.logger.log(`Login success: ${email} (${user.role.name})`);
 
     return {
       user: payload,
@@ -68,11 +113,8 @@ export class AuthService {
 
   async verifyToken(token: string): Promise<AuthUserPayload> {
     try {
-      const decoded = await this.jwt.verifyAsync<AuthUserPayload>(token);
-      this.logger.log(`Token verification success: ${decoded.email}`);
-      return decoded;
+      return await this.jwt.verifyAsync<AuthUserPayload>(token);
     } catch {
-      this.logger.warn(`Token verification failed`);
       throw new UnauthorizedException('Invalid or expired token');
     }
   }
