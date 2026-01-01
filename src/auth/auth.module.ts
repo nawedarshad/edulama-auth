@@ -4,11 +4,13 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../prisma/prisma.module';
+import { EmailModule } from '../email/email.module';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    // ConfigModule.forRoot() MOVED TO APP MODULE
     PrismaModule,
+    EmailModule,
 
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -16,10 +18,7 @@ import { PrismaModule } from '../prisma/prisma.module';
       useFactory: (config: ConfigService) => ({
         global: true,
         secret: config.get<string>('JWT_ACCESS_SECRET'),
-
-        // ⬇⬇⬇ FIX HERE ⬇⬇⬇
-        signOptions: { expiresIn: config.get<string>('JWT_ACCESS_EXPIRES') ?? '7d'} as any,
-        // ⬆⬆⬆ THIS REMOVES TYPE ERROR SAFELY ⬆⬆⬆
+        signOptions: { expiresIn: config.get<string>('JWT_ACCESS_EXPIRES') ?? '7d' } as any,
       }),
     }),
   ],
@@ -27,4 +26,4 @@ import { PrismaModule } from '../prisma/prisma.module';
   controllers: [AuthController],
   providers: [AuthService],
 })
-export class AuthModule {}
+export class AuthModule { }

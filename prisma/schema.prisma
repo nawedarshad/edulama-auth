@@ -6,74 +6,146 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+// ==========================
+// ENUMS
+// ==========================
+
+enum AuthType {
+  EMAIL
+  PHONE
+  USERNAME
+}
+
+enum UiFeatureType {
+  MENU
+  PAGE
+  ACTION
+}
+
+enum AcademicYearStatus {
+  PLANNED
+  ACTIVE
+  CLOSED
+  ARCHIVED
+}
+
+// ==========================
+// TENANT (SCHOOL)
+// ==========================
+
+model School {
+  id        Int     @id @default(autoincrement())
+  name      String
+  code      String  @unique // mobile login
+  subdomain String  @unique // web login
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  users                   User[]
+  academicYears           AcademicYear[]
+  authIdentities          AuthIdentity[]
+  schoolModules           SchoolModule[]
+  auditLogs               AuditLog[]
+
+  @@index([code])
+  @@index([subdomain])
+}
+
+// ==========================
+// ACADEMIC YEAR
+// ==========================
+
+model AcademicYear {
+  id        Int                @id @default(autoincrement())
+  schoolId  Int
+  name      String
+  startDate DateTime           @default(now()) @db.Date
+  endDate   DateTime           @default(now()) @db.Date
+  status    AcademicYearStatus @default(PLANNED)
+
+  createdAt DateTime @default(now())
+
+  school              School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@unique([schoolId, name])
+  @@index([schoolId])
+}
+
+// ==========================
+// USER (PURE IDENTITY)
+// ==========================
 
 model User {
-  id        Int       @id @default(autoincrement())
-  name      String
-  email     String    @unique
-  password  String
-  phone     String?
-  photo     String?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @default(now()) @updatedAt
-  isActive  Boolean   @default(true)
-  lastSeen  DateTime?
+  id       Int       @id @default(autoincrement())
+  schoolId Int
+  name     String
+  photo    String?
+  isActive Boolean   @default(true)
+  lastSeen DateTime?
 
-  roleId          Int
-  role            Role             @relation(fields: [roleId], references: [id])
-  UserRole        UserRole[]
-  AuthToken       AuthToken[]
-  PasswordReset   PasswordReset[]
-  userPermissions UserPermission[]
-}
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 
-model Role {
-  id   Int    @id @default(autoincrement())
-  name String @unique
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 
-  users    User[]
-  UserRole UserRole[]
-  Role     RolePermission[]
-}
-
-model UserRole {
-  userId Int
   roleId Int
+  role   Role @relation(fields: [roleId], references: [id])
 
-  user User @relation(fields: [userId], references: [id])
-  role Role @relation(fields: [roleId], references: [id])
+  auditLogs                  AuditLog[]
+  authIdentities             AuthIdentity[]
+  passwordResets             PasswordReset[]
+  authTokens                 AuthToken[]
+  userRoles                  UserRole[]
+  userPermissions            UserPermission[]
 
-  @@id([userId, roleId]) // composite primary key
+  @@index([schoolId])
 }
 
-model Permission {
-  id              Int              @id @default(autoincrement())
-  name            String           @unique
-  Permission      RolePermission[]
-  userPermissions UserPermission[]
+// ==========================
+// AUTH IDENTITY (LOGIN METHODS)
+// ==========================
+
+model AuthIdentity {
+  id       Int      @id @default(autoincrement())
+  userId   Int
+  schoolId Int
+  type     AuthType
+  value    String
+  secret   String?
+  verified Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@unique([schoolId, type, value])
+  @@index([type, value])
 }
 
-model UserPermission {
-  userId       Int
-  permissionId Int
+// ==========================
+// PASSWORD RESET (TENANT SAFE)
+// ==========================
 
-  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+model PasswordReset {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  schoolId  Int
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
 
-  @@id([userId, permissionId])
-  @@index([permissionId])
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId])
 }
 
-model RolePermission {
-  id           Int @id @default(autoincrement())
-  roleId       Int
-  permissionId Int
-
-  role       Role       @relation(fields: [roleId], references: [id])
-  permission Permission @relation(fields: [permissionId], references: [id])
-
-  @@unique([roleId, permissionId]) // ensures no duplicate mappings
-}
+// ==========================
+// AUTH TOKEN
+// ==========================
 
 model AuthToken {
   id        Int      @id @default(autoincrement())
@@ -85,12 +157,149 @@ model AuthToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
-model PasswordReset {
-  id         Int      @id @default(autoincrement())
-  userId     Int
-  resetToken String   @unique
-  expiresAt  DateTime
-  createdAt  DateTime @default(now())
+// ==========================
+// ROLES & PERMISSIONS (UNCHANGED)
+// ==========================
+
+model Role {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+
+  users                 User[]
+  userRoles             UserRole[]
+  rolePermissions       RolePermission[]
+  uiFeatureRoles        UiFeatureRole[]
+}
+
+model UserRole {
+  userId Int
+  roleId Int
 
   user User @relation(fields: [userId], references: [id])
+  role Role @relation(fields: [roleId], references: [id])
+
+  @@id([userId, roleId])
+}
+
+model Permission {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+
+  rolePermissions RolePermission[]
+  userPermissions UserPermission[]
+}
+
+model UserPermission {
+  userId       Int
+  permissionId Int
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+}
+
+model RolePermission {
+  id           Int @id @default(autoincrement())
+  roleId       Int
+  permissionId Int
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@unique([roleId, permissionId])
+}
+
+// ==========================
+// FEATURE FLAGS
+// ==========================
+
+model Module {
+  id            Int            @id @default(autoincrement())
+  key           String         @unique // ATTENDANCE, FEES, EVENTS, EXAMS
+  schoolModules SchoolModule[]
+}
+
+model SchoolModule {
+  id       Int     @id @default(autoincrement())
+  schoolId Int
+  moduleId Int
+  enabled  Boolean @default(false)
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  module Module @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, moduleId])
+}
+
+model UiFeature {
+  id Int @id @default(autoincrement())
+
+  key  String        @unique // ATTENDANCE_VIEW, FEES_EDIT
+  name String
+  type UiFeatureType
+
+  path String?
+  icon String?
+  api  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  roles UiFeatureRole[]
+}
+
+model UiFeatureRole {
+  id          Int @id @default(autoincrement())
+  roleId      Int
+  uiFeatureId Int
+
+  role      Role      @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  uiFeature UiFeature @relation(fields: [uiFeatureId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, uiFeatureId])
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  REJECT
+  LOGIN
+  LOGOUT
+}
+
+model AuditLog {
+  id BigInt @id @default(autoincrement())
+
+  // Tenant safety
+  schoolId Int
+  userId   Int?
+
+  // What happened
+  entity   String // "Attendance", "Fee", "LessonPlan"
+  entityId Int?
+  action   AuditAction
+
+  // Optional change snapshot
+  oldValue Json?
+  newValue Json?
+
+  // Metadata
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  // Relations
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([schoolId])
+  @@index([userId])
+  @@index([entity])
+  @@index([action])
+  @@index([createdAt])
 }
