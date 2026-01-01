@@ -1,98 +1,121 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Edulama Auth Microservice
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+> **PROPERTY OF EDULAMA**
+> 
+> *This software and associated documentation files (the "Software") are the proprietary property of Edulama. Unauthorized copying, distribution, modification, or use of this file, via any medium, is strictly prohibited. This document is intended solely for internal use by authorized personnel.*
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## 📖 About This Service
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+The **Edulama Auth Microservice** acts as the central **Identity and Access Management (IAM)** authority for the Edulama ecosystem. It is designed to handle multi-tenant authentication, ensuring secure and isolated access for thousands of schools and their respective users (Principals, Teachers, Students, Parents).
 
-## Project setup
+This service abstracts complex security protocols, allowing other microservices to remain lightweight by delegating identity verification to this centralized hub.
 
+## 🏗 Architecture & How It Works
+
+This microservice is built on a robust, scalable architecture prioritizing security and performance.
+
+### Core Technology Stack
+-   **Framework**: [NestJS](https://nestjs.com/) (Node.js) for modular, testable, and scalable server-side applications.
+-   **Database**: PostgreSQL managed via [Prisma ORM](https://www.prisma.io/).
+-   **Authentication**: Passport.js with JWT (JSON Web Tokens) strategies.
+-   **Security**:
+    -   **Argon2**: State-of-the-art password hashing.
+    -   **Helmet**: Sets secure HTTP headers.
+    -   **Throttler**: Rate limiting to prevent brute-force attacks.
+
+### Workflow & Logic
+1.  **Multi-Tenancy**: The system is designed from the ground up to be multi-tenant. Every user belongs to a `School` (Tenant). Authentication requests often require a `schoolCode` to resolve the correct tenant context.
+2.  **Stateless Authentication**: Upon successful login, the service issues a **JWT (Access Token)**. This token contains encrypted claims (User ID, School ID, Role) that allow other services to verify identity without querying the database for every request.
+3.  **Role-Based Access Control (RBAC)**: Users are assigned `Roles` (e.g., ADMIN, TEACHER), and Roles are granularly defined by `Permissions` and `UiFeatures`.
+4.  **Audit Logging**: Critical actions (Login, Password Reset) are logged immutably in the `AuditLog` table for security compliance.
+
+### Key Modules
+-   **AuthModule**: Core logic for Login, Token Generation, and Context Switching.
+-   **EmailModule**: Handles transactional emails (e.g., Password Reset) via SMTP/Nodemailer.
+-   **PrismaModule**: Managing database connections and schema queries.
+
+---
+
+## 🚀 Setup & Installation
+
+Follow these steps to set up the microservice locally for development.
+
+### 1. Prerequisites
+-   **Node.js**: v18 or higher.
+-   **PostgreSQL**: A running postgres instance.
+-   **npm**: Package manager.
+
+### 2. Environment Configuration
+Create a `.env` file in the root directory. You can pattern it after `.env.example` if available. Required variables include:
+
+| Variable | Description | Example |
+| :--- | :--- | :--- |
+| `PORT` | Port for the API to listen on | `4000` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@localhost:5432/edulama_auth` |
+| `JWT_SECRET` | Secret key for signing tokens | `super-secret-key-change-this` |
+| `MAIL_HOST` | SMTP Host for emails | `smtp.example.com` |
+| `MAIL_PORT` | SMTP Port | `587` |
+| `MAIL_USER` | SMTP Username | `no-reply@edulama.com` |
+| `MAIL_PASSWORD` | SMTP Password | `******` |
+| `MAIL_FROM` | Default sender address | `Edulama Security <no-reply@edulama.com>` |
+
+### 3. Installation
+Install the project dependencies.
 ```bash
-$ npm install
+npm install
 ```
 
-## Compile and run the project
-
+### 4. Database Setup
+Ensure your PostgreSQL database is running, then apply migrations to create the schema.
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npx prisma generate
+npx prisma migrate dev
 ```
 
-## Run tests
+### 5. Running the Application
 
+**Development Mode** (Hot-reload):
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm run start:dev
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
+**Production Mode**:
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+npm run build
+npm run start:prod
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+**Debug Mode**:
+```bash
+npm run start:debug
+```
 
-## Resources
+### 6. Testing
+Run the test suite to ensure system integrity.
+```bash
+# Unit tests
+npm run test
 
-Check out a few resources that may come in handy when working with NestJS:
+# End-to-end tests
+npm run test:e2e
+```
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+---
 
-## Support
+## 📡 API Endpoints Overview
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/auth/login` | Authenticate user with Email, Password, and SchoolCode. |
+| `POST` | `/auth/forgot-password` | Trigger a password reset email. |
+| `POST` | `/auth/reset-password` | Set a new password using a token. |
+| `POST` | `/auth/verify` | Verify the validity of a JWT Access Token. |
+| `GET` | `/auth/me` | Retrieve current user profile and school context. |
+| `PATCH` | `/auth/switch-academic-year` | Switch the active academic year context. |
+| `GET` | `/auth/health` | Health check probe. |
 
-## Stay in touch
+---
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+*For further technical details, please refer to the internal wiki or contact the Lead Architect.*
