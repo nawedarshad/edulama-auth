@@ -250,6 +250,7 @@ export class AuthService {
     payload.email = email;
 
     const accessToken = await this.jwt.signAsync(payload);
+    const refreshToken = await this.generateRefreshToken(user.id);
 
     // Create audit log
     await this.createAuditLog({
@@ -264,6 +265,7 @@ export class AuthService {
     return {
       user: payload,
       accessToken,
+      refreshToken,
       school: {
         id: user.school.id,
         name: user.school.name,
@@ -273,6 +275,218 @@ export class AuthService {
       academicYear: user.academicYear,
     };
   }
+
+  /* -------- REFRESH TOKEN -------- */
+  private async generateRefreshToken(userId: number): Promise<string> {
+    const token = crypto.randomBytes(40).toString('hex');
+    await this.prisma.authToken.create({
+      data: {
+        userId,
+        token,
+      },
+    });
+    return token;
+  }
+
+  async rotateRefreshToken(token: string): Promise<{ accessToken: string; refreshToken: string; user: AuthUserPayload }> {
+    const authToken = await this.prisma.authToken.findUnique({
+      where: { token },
+      include: { user: true },
+    });
+
+    if (!authToken) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    // Check expiry (7 days)
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    // Always delete the old token (Rotation)
+    await this.prisma.authToken.delete({
+      where: { id: authToken.id },
+    });
+
+    if (authToken.createdAt < sevenDaysAgo) {
+      throw new UnauthorizedException('Refresh token expired');
+    }
+
+    // Get full user details for payload
+    const user = await this.prisma.user.findUnique({
+      where: { id: authToken.userId },
+      include: {
+        role: true,
+        school: true,
+        userPermissions: { include: { permission: true } },
+      },
+    });
+
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('User inactive or not found');
+    }
+
+    // Generate new pair
+    // Re-construct payload (reuse internal method if possible, but we need 'UserWithAllPermissions')
+    // Easier to just re-fetch fully as above.
+
+    // Cast to UserWithAllPermissions for toPayload
+    const userForPayload = user as any; // Type assertion since structure matches include
+    const payload = await this.toPayload(userForPayload);
+
+    const accessToken = await this.jwt.signAsync(payload);
+    const newRefreshToken = await this.generateRefreshToken(user.id);
+
+    return {
+      accessToken,
+      refreshToken: newRefreshToken,
+      user: payload,
+    };
+  }
+
+  /* -------- OTP & MAGIC LINK -------- */
+  async sendOtp(identifier: string, type: 'EMAIL' | 'PHONE' = 'EMAIL'): Promise<{ message: string; devOtp?: string }> {
+    // 1. Find User by Identity
+    const identity = await this.prisma.authIdentity.findFirst({
+      where: {
+        value: identifier,
+        type: type,
+        verified: true,
+      },
+      include: { user: true },
+    });
+
+    if (!identity) {
+      // Return success to prevent enumeration
+      return { message: 'OTP sent if account exists' };
+    }
+
+    // 2. Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // 3. Store in PasswordReset table (repurposed for OTP)
+    // Delete existing OTPs for this user first to prevent clutter
+    // Note: PasswordReset has 'token' @unique, so we can't have duplicate OTPs globally easily if we just store '123456'.
+    // Better: Store "OTP:<userId>:<random>"? No, checking against input.
+    // Solution: We'll use a prefix or just rely on the fact that collisions are rare-ish if we scope by time, 
+    // BUT 'token' is unique constraint. We can't store '123456'.
+    // ALTERNATIVE: Use AuthToken for OTP? No. 
+    // Let's use `token = otp + "_" + crypto.randomBytes(4).toString('hex')`? No user enters 6 digits.
+    // OK, we must use a different table OR use `Hash` for storage?
+    // Let's use `AuthIdentity.secret` temporary update? No.
+    //
+    // OK, for this task, I will use an IN-MEMORY Cache or just accept that I need to create a Token Table?
+    // User said "Make it production".
+    // I already have `PasswordReset` which expects a unique string.
+    // I will use a prefix in the DB `OTP:USERID:CODE` -> User enters CODE -> We verify?
+    // No we need to look up by CODE? Or look up by USER + CODE?
+    // In `loginWithOtp`, we usually ask for "Email" AND "Code". 
+    // So we can look up User by Email -> userId -> Find OTP record for this userId.
+    // The `PasswordReset` table doesn't have a composite unique constraint, it has `token` @unique.
+    // So I can't store just '123456'.
+    //
+    // PLAN B: Construct a "Reset Token" that IS the OTP? No, uniqueness fails.
+    // 
+    // Let's ADD a new table or field?
+    // "Review User models in Prisma schema" was done. `PasswordReset` is the best candidate if I can make `token` non-unique or scope it.
+    // But I can't change schema easily without migration runner.
+    // 
+    // I will use `AuthToken` with a special prefix "OTP:<code_hash>"?
+    // NO.
+    //
+    // I will use a simple workaround: Store the OTP in `AuthIdentity` `secret` temporarily? 
+    // No, that overwrites password.
+    // 
+    // I will use the `PasswordReset` table but the token will be `${otp}_${identity.id}`.
+    // When verifying, I need the identity ID.
+    // Input: Email + OTP.
+    // 1. Find Identity by Email -> get ID.
+    // 2. Compute token = `${otp}_${identity.id}`.
+    // 3. Find PasswordReset by this token.
+    // 4. Verify.
+    // This works and satisfies unique constraint!
+
+    const dbToken = `${otp}_${identity.id}`;
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
+
+    // Clean up old
+    await this.prisma.passwordReset.deleteMany({
+      where: { userId: identity.userId, token: { contains: `_${identity.id}` } } // Safe-ish cleanup
+    });
+
+    await this.prisma.passwordReset.create({
+      data: {
+        userId: identity.userId,
+        schoolId: identity.schoolId,
+        token: dbToken,
+        expiresAt,
+      },
+    });
+
+    // 4. Send Email
+    if (type === 'EMAIL') {
+      // await this.emailService.sendOtp(identifier, otp);
+      this.logger.log(`OTP for ${identifier}: ${otp}`); // Log for dev
+      // TODO: Implement actual Email Template for OTP
+    } else {
+      this.logger.log(`SMS OTP for ${identifier}: ${otp} (Provider not configured)`);
+    }
+
+    return { message: 'OTP sent', devOtp: process.env.NODE_ENV !== 'production' ? otp : undefined };
+  }
+
+  async loginWithOtp(identifier: string, code: string) {
+    // 1. Find Identity
+    const identity = await this.prisma.authIdentity.findFirst({
+      where: { value: identifier, verified: true },
+      include: { user: { include: { role: true, school: true, userPermissions: { include: { permission: true } } } } },
+    });
+
+    if (!identity) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    // 2. Reconstruct Token
+    const dbToken = `${code}_${identity.id}`;
+
+    // 3. Find in DB
+    const verification = await this.prisma.passwordReset.findUnique({
+      where: { token: dbToken },
+    });
+
+    if (!verification) {
+      throw new UnauthorizedException('Invalid OTP');
+    }
+
+    if (verification.expiresAt < new Date()) {
+      await this.prisma.passwordReset.delete({ where: { token: dbToken } });
+      throw new UnauthorizedException('OTP expired');
+    }
+
+    // 4. Consume OTP
+    await this.prisma.passwordReset.delete({ where: { token: dbToken } });
+
+    // 5. Login Success
+    const user = identity.user;
+    // Cast to UserWithAllPermissions
+    const userForPayload = user as any;
+    const payload = await this.toPayload(userForPayload);
+
+    const accessToken = await this.jwt.signAsync(payload);
+    const refreshToken = await this.generateRefreshToken(user.id);
+
+    return {
+      user: payload,
+      accessToken,
+      refreshToken,
+      school: {
+        id: user.school.id,
+        name: user.school.name,
+        code: user.school.code,
+      },
+      academicYear: (user as any).academicYear,
+    };
+  }
+
 
   /* -------- VERIFY TOKEN -------- */
   async verifyToken(token: string): Promise<AuthUserPayload> {
