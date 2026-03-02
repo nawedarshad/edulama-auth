@@ -6,11 +6,13 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
 // ==========================
 // ENUMS
 // ==========================
 
 enum AuthType {
+  GOOGLE
   EMAIL
   PHONE
   USERNAME
@@ -43,11 +45,12 @@ model School {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  users                   User[]
-  academicYears           AcademicYear[]
-  authIdentities          AuthIdentity[]
-  schoolModules           SchoolModule[]
-  auditLogs               AuditLog[]
+  users          User[]
+  academicYears  AcademicYear[]
+  authIdentities AuthIdentity[]
+  schoolModules  SchoolModule[]
+  auditLogs      AuditLog[]
+  userSchools    UserSchool[]
 
   @@index([code])
   @@index([subdomain])
@@ -67,7 +70,7 @@ model AcademicYear {
 
   createdAt DateTime @default(now())
 
-  school              School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
 
   @@unique([schoolId, name])
   @@index([schoolId])
@@ -79,7 +82,6 @@ model AcademicYear {
 
 model User {
   id       Int       @id @default(autoincrement())
-  schoolId Int
   name     String
   photo    String?
   isActive Boolean   @default(true)
@@ -88,19 +90,18 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-
-  roleId Int
-  role   Role @relation(fields: [roleId], references: [id])
-
-  auditLogs                  AuditLog[]
-  authIdentities             AuthIdentity[]
-  passwordResets             PasswordReset[]
-  authTokens                 AuthToken[]
-  userRoles                  UserRole[]
-  userPermissions            UserPermission[]
-
-  @@index([schoolId])
+  auditLogs       AuditLog[]
+  authIdentities  AuthIdentity[]
+  passwordResets  PasswordReset[]
+  authTokens      AuthToken[]
+  userRoles       UserRole[]
+  userSchools     UserSchool[]
+  userPermissions UserPermission[]
+  school          School?          @relation(fields: [schoolId], references: [id])
+  schoolId        Int?
+  tokenVersion    Int              @default(1)
+  role            Role?            @relation(fields: [roleId], references: [id])
+  roleId          Int?
 }
 
 // ==========================
@@ -110,7 +111,6 @@ model User {
 model AuthIdentity {
   id       Int      @id @default(autoincrement())
   userId   Int
-  schoolId Int
   type     AuthType
   value    String
   secret   String?
@@ -118,10 +118,54 @@ model AuthIdentity {
 
   createdAt DateTime @default(now())
 
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  school   School? @relation(fields: [schoolId], references: [id])
+  schoolId Int?
+
+  @@unique([type, value])
+  @@index([type, value])
+}
+
+// ==========================
+// USER SCHOOL (TENANT MEMBERSHIP)
+// ==========================
+
+model UserSchool {
+  id       Int     @id @default(autoincrement())
+  userId   Int
+  schoolId Int
+  roleId   Int
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id])
 
-  @@unique([schoolId, type, value])
+  @@unique([userId, schoolId])
+  @@index([userId])
+  @@index([schoolId])
+}
+
+// ==========================
+// OTP VERIFICATION (TEMPORARY STATE)
+// ==========================
+
+model OtpVerification {
+  id        Int      @id @default(autoincrement())
+  type      AuthType // EMAIL or PHONE
+  value     String // The email or phone number
+  otpHash   String // Hashed OTP value
+  attempts  Int      @default(0)
+  expiresAt DateTime
+  ip        String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([type, value])
   @@index([type, value])
 }
 
@@ -150,11 +194,18 @@ model PasswordReset {
 model AuthToken {
   id        Int      @id @default(autoincrement())
   userId    Int
-  token     String   @unique
+  schoolId  Int?
+  roleId    Int?
+  ip        String?
+  userAgent String?
+  tokenHash String   @unique
+  expiresAt DateTime
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 // ==========================
@@ -165,10 +216,11 @@ model Role {
   id   Int    @id @default(autoincrement())
   name String @unique
 
-  users                 User[]
-  userRoles             UserRole[]
-  rolePermissions       RolePermission[]
-  uiFeatureRoles        UiFeatureRole[]
+  users           User[]
+  userRoles       UserRole[]
+  rolePermissions RolePermission[]
+  uiFeatureRoles  UiFeatureRole[]
+  userSchools     UserSchool[]
 }
 
 model UserRole {

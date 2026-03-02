@@ -1,720 +1,725 @@
-import { Injectable, UnauthorizedException, Logger, ForbiddenException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  UnauthorizedException,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
-import type { Role, User, AcademicYear } from '@prisma/client';
-import * as argon2 from 'argon2';
+import { OtpService } from './otp.service';
+import { AuthType } from '@prisma/client';
 import * as crypto from 'crypto';
-import { EmailService } from '../email/email.service';
-
-export type UserRole = 'PRINCIPAL' | 'TEACHER' | 'STUDENT' | 'PARENT' | 'ADMIN';
+import * as argon2 from 'argon2';
 
 export interface AuthUserPayload {
-  id: number;
-  email: string;
-  schoolId: number;
-  role: UserRole;
+  sub: number; // userId
+  schoolId?: number;
+  roleId?: number;
+  role?: string; // Role name
+  subdomain?: string;
+  email?: string;
+  tokenVersion: number;
   permissions: string[];
-  academicYearId?: number;
-  academicYearName?: string;
+  type: 'access' | 'refresh';
 }
-
-type UserWithAllPermissions = User & {
-  role: Role;
-  userPermissions: {
-    permission: {
-      name: string;
-    };
-  }[];
-  school: {
-    id: number;
-    name: string;
-    code: string;
-    // subdomain: string; // Removed from usage as requested
-  };
-  academicYear?: {
-    id: number;
-    name: string;
-    isActive: boolean;
-  };
-};
 
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
+  private readonly frontendBaseUrl =
+    process.env.FRONTEND_BASE_URL?.trim() || 'http://localhost:3000';
+
+  private maskIdentifier(id: string | number | null | undefined): string {
+    if (!id) return 'unknown';
+    const s = String(id);
+    if (s.includes('@')) {
+      const [u, d] = s.split('@');
+      return `${u.slice(0, 2)}***@${d}`;
+    }
+    if (s.length > 5) {
+      return `${s.slice(0, 3)}***${s.slice(-2)}`;
+    }
+    return '***';
+  }
+
+  private resolveSubdomainForMembership(membership: any): string {
+    const schoolSubdomain = membership?.school?.subdomain?.trim();
+    if (schoolSubdomain) return schoolSubdomain;
+
+    const schoolCode = membership?.school?.code?.trim();
+    if (schoolCode) return schoolCode.toLowerCase();
+
+    return '';
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
-    private readonly emailService: EmailService,
+    private readonly otpService: OtpService,
   ) { }
 
-  /* -------- EXTRACT PERMISSIONS -------- */
-  private async extractPermissions(userId: number, roleId: number): Promise<string[]> {
-    const [rolePermissions, userPermissions] = await Promise.all([
-      this.prisma.rolePermission.findMany({
-        where: { roleId },
-        include: {
-          permission: true,
-        },
-      }),
-      this.prisma.userPermission.findMany({
-        where: { userId },
-        include: {
-          permission: true,
-        },
-      }),
-    ]);
-
-    const permissions = new Set<string>();
-
-    rolePermissions.forEach((rp) => permissions.add(rp.permission.name));
-    userPermissions.forEach((up) => permissions.add(up.permission.name));
-
-    return Array.from(permissions);
-  }
-
-  /* -------- GET ACTIVE ACADEMIC YEAR -------- */
-  private async getActiveAcademicYear(schoolId: number): Promise<{ id: number; name: string; isActive: boolean } | null> {
-    const academicYear = await this.prisma.academicYear.findFirst({
-      where: {
-        schoolId,
-        status: 'ACTIVE',
-      },
-      select: {
-        id: true,
-        name: true,
-      },
-    });
-
-    if (!academicYear) return null;
-
-    return {
-      ...academicYear,
-      isActive: true,
-    };
-  }
-
-  /* -------- TO PAYLOAD -------- */
-  private async toPayload(user: UserWithAllPermissions): Promise<AuthUserPayload> {
-    const permissions = await this.extractPermissions(user.id, user.roleId);
-    const academicYear = await this.getActiveAcademicYear(user.schoolId);
-    const email = await this.getUserEmail(user.id);
-
-    return {
-      id: user.id,
-      email,
-      schoolId: user.schoolId,
-      role: user.role.name as UserRole,
-      permissions,
-      academicYearId: academicYear?.id,
-      academicYearName: academicYear?.name,
-    };
-  }
-
-  /* -------- GET USER EMAIL -------- */
-  private async getUserEmail(userId: number): Promise<string> {
-    const authIdentity = await this.prisma.authIdentity.findFirst({
-      where: {
-        userId,
-        type: 'EMAIL',
-        verified: true,
-      },
-    });
-
-    if (!authIdentity) {
-      throw new UnauthorizedException('No verified email found for user');
-    }
-
-    return authIdentity.value;
-  }
-
-  /* -------- VALIDATE USER (ARGON2 + LAZY MIGRATION) -------- */
-  async validateUser(
-    email: string,
-    password: string,
-    schoolCode: string,
-  ): Promise<UserWithAllPermissions> {
-    // First, find the school by code - SUBDOMAIN REMOVED
-    const school = await this.prisma.school.findFirst({
-      where: {
-        code: schoolCode,
-        isActive: true,
-      },
-    });
-
-    if (!school) {
-      throw new UnauthorizedException('School not found or inactive');
-    }
-
-    // Find auth identity for this school
-    const authIdentity = await this.prisma.authIdentity.findFirst({
-      where: {
-        schoolId: school.id,
-        type: 'EMAIL',
-        value: email,
-        verified: true,
-      },
-      include: {
-        user: true,
-      },
-    });
-
-    if (!authIdentity) {
-      throw new UnauthorizedException('Invalid credentials');
-    }
-
-    // Check Password
-    let isPasswordValid = false;
-
-    // 1. Try verifiable hash first (Argon2)
-    try {
-      if (authIdentity.secret && authIdentity.secret.startsWith('$argon2')) {
-        isPasswordValid = await argon2.verify(authIdentity.secret, password);
-      }
-    } catch (e) {
-      // Ignore error, treat as invalid hash
-    }
-
-    // 2. If not a generic hash or verification failed, check plain text (Legacy support)
-    if (!isPasswordValid && authIdentity.secret === password) {
-      isPasswordValid = true;
-
-      // LAZY MIGRATION: Update to Argon2 immediately
-      this.logger.log(`Migrating user ${authIdentity.userId} password to Argon2 hash`);
-      const hashedPassword = await argon2.hash(password);
-      await this.prisma.authIdentity.update({
-        where: { id: authIdentity.id },
-        data: { secret: hashedPassword },
-      });
-    }
-
-    if (!isPasswordValid) {
-      throw new UnauthorizedException('Invalid credentials');
-    }
-
-    // Get full user with relations
-    const user = await this.prisma.user.findUnique({
-      where: {
-        id: authIdentity.userId,
-        schoolId: school.id,
-      },
-      include: {
-        role: true,
-        school: {
-          select: {
-            id: true,
-            name: true,
-            code: true,
-            // subdomain: true, // Removed from select
-          },
-        },
-        userPermissions: {
-          include: {
-            permission: true,
-          },
-        },
-      },
-    });
-
-    if (!user) {
-      throw new UnauthorizedException('User not found');
-    }
-
-    if (!user.isActive) {
-      throw new UnauthorizedException('Account inactive');
-    }
-
-    // Get active academic year
-    const academicYear = await this.getActiveAcademicYear(school.id);
-
-    this.logger.log(
-      `User validated: ${email} (${user.role.name}) | School: ${school.name} | Perms: ${user.userPermissions.length}`,
-    );
-
-    return {
-      ...user,
-      academicYear: academicYear || undefined,
-    };
-  }
-
-  /* -------- LOGIN -------- */
-  async login(
-    email: string,
-    password: string,
-    schoolCode: string,
+  private async createAuditLog(
+    schoolId: number,
+    userId: number | null,
+    action: any, // AuditAction
+    ipAddress?: string,
   ) {
-    const user = await this.validateUser(email, password, schoolCode);
-    const payload = await this.toPayload(user);
-
-    // Set email from auth identity
-    payload.email = email;
-
-    const accessToken = await this.jwt.signAsync(payload);
-    const refreshToken = await this.generateRefreshToken(user.id);
-
-    // Create audit log
-    await this.createAuditLog({
-      schoolId: user.schoolId,
-      userId: user.id,
-      entity: 'User',
-      entityId: user.id,
-      action: 'LOGIN',
-      ipAddress: '', // Will be set by controller
-    });
-
-    return {
-      user: payload,
-      accessToken,
-      refreshToken,
-      school: {
-        id: user.school.id,
-        name: user.school.name,
-        code: user.school.code,
-        // subdomain: user.school.subdomain, // Removed
-      },
-      academicYear: user.academicYear,
-    };
-  }
-
-  /* -------- REFRESH TOKEN -------- */
-  private async generateRefreshToken(userId: number): Promise<string> {
-    const token = crypto.randomBytes(40).toString('hex');
-    await this.prisma.authToken.create({
-      data: {
-        userId,
-        token,
-      },
-    });
-    return token;
-  }
-
-  async rotateRefreshToken(token: string): Promise<{ accessToken: string; refreshToken: string; user: AuthUserPayload }> {
-    const authToken = await this.prisma.authToken.findUnique({
-      where: { token },
-      include: { user: true },
-    });
-
-    if (!authToken) {
-      throw new UnauthorizedException('Invalid refresh token');
-    }
-
-    // Check expiry (7 days)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-    // Always delete the old token (Rotation)
-    await this.prisma.authToken.delete({
-      where: { id: authToken.id },
-    });
-
-    if (authToken.createdAt < sevenDaysAgo) {
-      throw new UnauthorizedException('Refresh token expired');
-    }
-
-    // Get full user details for payload
-    const user = await this.prisma.user.findUnique({
-      where: { id: authToken.userId },
-      include: {
-        role: true,
-        school: true,
-        userPermissions: { include: { permission: true } },
-      },
-    });
-
-    if (!user || !user.isActive) {
-      throw new UnauthorizedException('User inactive or not found');
-    }
-
-    // Generate new pair
-    // Re-construct payload (reuse internal method if possible, but we need 'UserWithAllPermissions')
-    // Easier to just re-fetch fully as above.
-
-    // Cast to UserWithAllPermissions for toPayload
-    const userForPayload = user as any; // Type assertion since structure matches include
-    const payload = await this.toPayload(userForPayload);
-
-    const accessToken = await this.jwt.signAsync(payload);
-    const newRefreshToken = await this.generateRefreshToken(user.id);
-
-    return {
-      accessToken,
-      refreshToken: newRefreshToken,
-      user: payload,
-    };
-  }
-
-  /* -------- OTP & MAGIC LINK -------- */
-  async sendOtp(identifier: string, type: 'EMAIL' | 'PHONE' = 'EMAIL'): Promise<{ message: string; devOtp?: string }> {
-    // 1. Find User by Identity
-    const identity = await this.prisma.authIdentity.findFirst({
-      where: {
-        value: identifier,
-        type: type,
-        verified: true,
-      },
-      include: { user: true },
-    });
-
-    if (!identity) {
-      // Return success to prevent enumeration
-      return { message: 'OTP sent if account exists' };
-    }
-
-    // 2. Generate 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    // 3. Store in PasswordReset table (repurposed for OTP)
-    // Delete existing OTPs for this user first to prevent clutter
-    // Note: PasswordReset has 'token' @unique, so we can't have duplicate OTPs globally easily if we just store '123456'.
-    // Better: Store "OTP:<userId>:<random>"? No, checking against input.
-    // Solution: We'll use a prefix or just rely on the fact that collisions are rare-ish if we scope by time, 
-    // BUT 'token' is unique constraint. We can't store '123456'.
-    // ALTERNATIVE: Use AuthToken for OTP? No. 
-    // Let's use `token = otp + "_" + crypto.randomBytes(4).toString('hex')`? No user enters 6 digits.
-    // OK, we must use a different table OR use `Hash` for storage?
-    // Let's use `AuthIdentity.secret` temporary update? No.
-    //
-    // OK, for this task, I will use an IN-MEMORY Cache or just accept that I need to create a Token Table?
-    // User said "Make it production".
-    // I already have `PasswordReset` which expects a unique string.
-    // I will use a prefix in the DB `OTP:USERID:CODE` -> User enters CODE -> We verify?
-    // No we need to look up by CODE? Or look up by USER + CODE?
-    // In `loginWithOtp`, we usually ask for "Email" AND "Code". 
-    // So we can look up User by Email -> userId -> Find OTP record for this userId.
-    // The `PasswordReset` table doesn't have a composite unique constraint, it has `token` @unique.
-    // So I can't store just '123456'.
-    //
-    // PLAN B: Construct a "Reset Token" that IS the OTP? No, uniqueness fails.
-    // 
-    // Let's ADD a new table or field?
-    // "Review User models in Prisma schema" was done. `PasswordReset` is the best candidate if I can make `token` non-unique or scope it.
-    // But I can't change schema easily without migration runner.
-    // 
-    // I will use `AuthToken` with a special prefix "OTP:<code_hash>"?
-    // NO.
-    //
-    // I will use a simple workaround: Store the OTP in `AuthIdentity` `secret` temporarily? 
-    // No, that overwrites password.
-    // 
-    // I will use the `PasswordReset` table but the token will be `${otp}_${identity.id}`.
-    // When verifying, I need the identity ID.
-    // Input: Email + OTP.
-    // 1. Find Identity by Email -> get ID.
-    // 2. Compute token = `${otp}_${identity.id}`.
-    // 3. Find PasswordReset by this token.
-    // 4. Verify.
-    // This works and satisfies unique constraint!
-
-    const dbToken = `${otp}_${identity.id}`;
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
-
-    // Clean up old
-    await this.prisma.passwordReset.deleteMany({
-      where: { userId: identity.userId, token: { contains: `_${identity.id}` } } // Safe-ish cleanup
-    });
-
-    await this.prisma.passwordReset.create({
-      data: {
-        userId: identity.userId,
-        schoolId: identity.schoolId,
-        token: dbToken,
-        expiresAt,
-      },
-    });
-
-    // 4. Send Email
-    if (type === 'EMAIL') {
-      // await this.emailService.sendOtp(identifier, otp);
-      this.logger.log(`OTP for ${identifier}: ${otp}`); // Log for dev
-      // TODO: Implement actual Email Template for OTP
-    } else {
-      this.logger.log(`SMS OTP for ${identifier}: ${otp} (Provider not configured)`);
-    }
-
-    return { message: 'OTP sent', devOtp: process.env.NODE_ENV !== 'production' ? otp : undefined };
-  }
-
-  async loginWithOtp(identifier: string, code: string) {
-    // 1. Find Identity
-    const identity = await this.prisma.authIdentity.findFirst({
-      where: { value: identifier, verified: true },
-      include: { user: { include: { role: true, school: true, userPermissions: { include: { permission: true } } } } },
-    });
-
-    if (!identity) {
-      throw new UnauthorizedException('Invalid credentials');
-    }
-
-    // 2. Reconstruct Token
-    const dbToken = `${code}_${identity.id}`;
-
-    // 3. Find in DB
-    const verification = await this.prisma.passwordReset.findUnique({
-      where: { token: dbToken },
-    });
-
-    if (!verification) {
-      throw new UnauthorizedException('Invalid OTP');
-    }
-
-    if (verification.expiresAt < new Date()) {
-      await this.prisma.passwordReset.delete({ where: { token: dbToken } });
-      throw new UnauthorizedException('OTP expired');
-    }
-
-    // 4. Consume OTP
-    await this.prisma.passwordReset.delete({ where: { token: dbToken } });
-
-    // 5. Login Success
-    const user = identity.user;
-    // Cast to UserWithAllPermissions
-    const userForPayload = user as any;
-    const payload = await this.toPayload(userForPayload);
-
-    const accessToken = await this.jwt.signAsync(payload);
-    const refreshToken = await this.generateRefreshToken(user.id);
-
-    return {
-      user: payload,
-      accessToken,
-      refreshToken,
-      school: {
-        id: user.school.id,
-        name: user.school.name,
-        code: user.school.code,
-      },
-      academicYear: (user as any).academicYear,
-    };
-  }
-
-
-  /* -------- VERIFY TOKEN -------- */
-  async verifyToken(token: string): Promise<AuthUserPayload> {
-    try {
-      const payload = await this.jwt.verifyAsync<AuthUserPayload>(token);
-
-      // Verify user still exists and is active
-      const user = await this.prisma.user.findUnique({
-        where: {
-          id: payload.id,
-          schoolId: payload.schoolId,
-          isActive: true,
-        },
-      });
-
-      if (!user) {
-        throw new UnauthorizedException('User no longer exists or is inactive');
-      }
-
-      return payload;
-    } catch {
-      throw new UnauthorizedException('Invalid or expired token');
-    }
-  }
-
-  /* -------- FORGOT PASSWORD UTILS -------- */
-  async requestPasswordReset(email: string, schoolCode: string) {
-    // 1. Find School by CODE only
-    const school = await this.prisma.school.findFirst({
-      where: {
-        code: schoolCode,
-        isActive: true,
-      },
-    });
-
-    if (!school) {
-      // Silent fail for security, but return generic message
-      return { message: 'School Code Not Found' };
-    }
-
-    // 2. Find User Identity
-    const authIdentity = await this.prisma.authIdentity.findFirst({
-      where: {
-        schoolId: school.id,
-        type: 'EMAIL',
-        value: email,
-        verified: true,
-      },
-      include: { user: { include: { role: true } } },
-    });
-
-    if (!authIdentity) {
-      return { message: 'Email does not exist' };
-    }
-
-    const { user } = authIdentity;
-    const roleName = user.role.name;
-    const allowedRoles = ['PRINCIPAL', 'TEACHER', 'PARENT', 'ADMIN'];
-
-    if (!allowedRoles.includes(roleName)) {
-      // Not allowed for Students/Admins per requirement
-      return { message: 'Not allowed for Students' };
-    }
-
-    // 3. Generate Secure Token
-    const resetToken = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
-
-    // 4. Store Token
-    await this.prisma.passwordReset.create({
-      data: {
-        userId: user.id,
-        schoolId: school.id,
-        token: resetToken,
-        expiresAt: expiresAt,
-      },
-    });
-
-    // 5. Send Email (Real)
-    const resetLink = `https://edulama.com/reset-password?code=${school.code}&token=${resetToken}`;
-    await this.emailService.sendPasswordResetEmail(email, resetLink, school.name);
-
-    return { message: 'If the email exists, a reset link has been sent.' };
-  }
-
-  async resetPassword(token: string, newPassword: string) {
-    // 1. Validate Token
-    const resetRecord = await this.prisma.passwordReset.findUnique({
-      where: { token },
-    });
-
-    if (!resetRecord) {
-      throw new BadRequestException('Invalid or expired reset token');
-    }
-
-    if (resetRecord.usedAt) {
-      throw new BadRequestException('Token already used');
-    }
-
-    if (resetRecord.expiresAt < new Date()) {
-      throw new BadRequestException('Token expired');
-    }
-
-    // 2. Hash New Password
-    const hashedPassword = await argon2.hash(newPassword);
-
-    // 3. Update AuthIdentity
-    // We need to find the auth identity for this user -> email
-    const authIdentity = await this.prisma.authIdentity.findFirst({
-      where: {
-        userId: resetRecord.userId,
-        schoolId: resetRecord.schoolId,
-        type: 'EMAIL'
-      }
-    });
-
-    if (!authIdentity) {
-      throw new BadRequestException('User authentication record not found');
-    }
-
-    await this.prisma.authIdentity.update({
-      where: { id: authIdentity.id },
-      data: { secret: hashedPassword }
-    });
-
-    // 4. Mark Token Used
-    await this.prisma.passwordReset.update({
-      where: { token },
-      data: { usedAt: new Date() }
-    });
-
-    // 5. Create audit log
-    await this.createAuditLog({
-      schoolId: resetRecord.schoolId,
-      userId: resetRecord.userId,
-      entity: 'User',
-      entityId: resetRecord.userId,
-      action: 'UPDATE', // Could specific 'PASSWORD_RESET' if enum allows, but UPDATE is safe
-      newValue: { action: 'PASSWORD_RESET' }
-    });
-
-    return { message: 'Password updated successfully' };
-  }
-
-
-  /* -------- CREATE AUDIT LOG -------- */
-  private async createAuditLog(data: {
-    schoolId: number;
-    userId?: number;
-    entity: string;
-    entityId?: number;
-    action: string;
-    oldValue?: any;
-    newValue?: any;
-    ipAddress?: string;
-  }) {
     try {
       await this.prisma.auditLog.create({
         data: {
-          schoolId: data.schoolId,
-          userId: data.userId,
-          entity: data.entity,
-          entityId: data.entityId,
-          action: data.action as any,
-          oldValue: data.oldValue,
-          newValue: data.newValue,
-          ipAddress: data.ipAddress,
+          schoolId,
+          userId,
+          action,
+          entity: 'Authentication',
+          ipAddress,
         },
       });
-    } catch (error) {
-      this.logger.error('Failed to create audit log', error);
+    } catch (err) {
+      this.logger.error(`Failed to create audit log: ${err.message}`);
     }
   }
 
-  /* -------- SWITCH ACADEMIC YEAR -------- */
-  async switchAcademicYear(userId: number, schoolId: number, academicYearId: number): Promise<AuthUserPayload> {
-    // Verify user belongs to school
+  // ==========================
+  // JWT UTILS
+  // ==========================
+
+  private async generateTokens(
+    userId: number,
+    schoolId?: number,
+    roleId?: number,
+    email?: string,
+    role?: string,
+    subdomain?: string,
+    meta?: { ip?: string; userAgent?: string },
+  ) {
+    // 1. Fetch user for tokenVersion & validation
     const user = await this.prisma.user.findUnique({
-      where: {
-        id: userId,
-        schoolId: schoolId,
-        isActive: true,
+      where: { id: userId, isActive: true },
+      select: { tokenVersion: true },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('User not found or inactive');
+    }
+
+    // 2. Fetch permissions in parallel with minimal fields
+    let permissions: string[] = [];
+    if (roleId) {
+      const [rolePerms, userPerms] = await Promise.all([
+        this.prisma.rolePermission.findMany({
+          where: { roleId },
+          select: { permission: { select: { name: true } } },
+        }),
+        this.prisma.userPermission.findMany({
+          where: { userId },
+          select: { permission: { select: { name: true } } },
+        }),
+      ]);
+
+      permissions = Array.from(
+        new Set([
+          ...rolePerms.map((rp) => rp.permission.name),
+          ...userPerms.map((up) => up.permission.name),
+        ]),
+      );
+    }
+
+    const payload: AuthUserPayload = {
+      sub: userId,
+      schoolId: schoolId || undefined,
+      roleId: roleId || undefined,
+      role,
+      subdomain,
+      email,
+      tokenVersion: user.tokenVersion,
+      permissions,
+      type: 'access',
+    };
+
+    const accessToken = await this.jwt.signAsync(payload, { expiresIn: '15m' });
+
+    // Generate refresh token manually
+    const rawRefreshToken = crypto.randomBytes(40).toString('hex');
+    const tokenHash = crypto
+      .createHash('sha256')
+      .update(rawRefreshToken)
+      .digest('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+    await this.prisma.authToken.create({
+      data: {
+        userId,
+        schoolId,
+        roleId,
+        tokenHash,
+        expiresAt,
+        ip: meta?.ip,
+        userAgent: meta?.userAgent,
       },
+    });
+
+    return {
+      accessToken,
+      refreshToken: rawRefreshToken,
+    };
+  }
+
+  // ==========================
+  // GOOGLE OAUTH
+  // ==========================
+
+  async validateGoogleUser(
+    profile: any,
+    meta?: { ip?: string; userAgent?: string },
+  ) {
+    const { googleId, displayName, picture, oauthState } = profile;
+    const email = profile.email?.toLowerCase().trim();
+    this.logger.log(`validateGoogleUser for email: ${this.maskIdentifier(email)}`);
+
+    // CSRF / Multi-tenant Validation
+    const schoolIdFromState = oauthState?.schoolId ? parseInt(oauthState.schoolId) : null;
+
+    // 1. Check if identity exists for Google
+    const googleIdentity = await this.prisma.authIdentity.findUnique({
+      where: { type_value: { type: AuthType.GOOGLE, value: googleId } },
       include: {
-        role: true,
-        school: {
-          select: {
-            id: true,
-            name: true,
-            code: true,
-            // subdomain: true, // Removed
+        user: {
+          include: {
+            userSchools: { include: { school: true, role: true } },
+            school: true,
+            role: true,
           },
         },
       },
     });
 
-    if (!user) {
-      throw new ForbiddenException('Invalid user or school');
-    }
-
-    // Verify academic year belongs to school
-    const academicYear = await this.prisma.academicYear.findFirst({
-      where: {
-        id: academicYearId,
-        schoolId: schoolId,
+    // 2. Check if identity exists for Email (Account Linking)
+    const emailIdentity = await this.prisma.authIdentity.findUnique({
+      where: { type_value: { type: AuthType.EMAIL, value: email } },
+      include: {
+        user: {
+          include: {
+            userSchools: { include: { school: true, role: true } },
+            school: true,
+            role: true,
+          },
+        },
       },
     });
 
-    if (!academicYear) {
-      throw new ForbiddenException('Academic year not found');
+    let user;
+
+    if (googleIdentity && emailIdentity) {
+      if (googleIdentity.userId === emailIdentity.userId) {
+        user = googleIdentity.user;
+      } else {
+        // Unify
+        await this.prisma.authIdentity.update({
+          where: { id: googleIdentity.id },
+          data: { userId: emailIdentity.userId },
+        });
+        user = await this.prisma.user.findUnique({
+          where: { id: emailIdentity.userId },
+          include: {
+            userSchools: { include: { school: true, role: true } },
+            school: true,
+            role: true,
+          },
+        });
+      }
+    } else if (googleIdentity) {
+      user = googleIdentity.user;
+    } else if (emailIdentity) {
+      user = emailIdentity.user;
+      await this.prisma.authIdentity.create({
+        data: {
+          userId: user.id,
+          type: AuthType.GOOGLE,
+          value: googleId,
+          verified: true,
+        },
+      });
+    } else {
+      // 3. Create new user globally
+      user = await this.prisma.user.create({
+        data: {
+          name: displayName || email,
+          photo: picture,
+          authIdentities: {
+            create: [
+              { type: AuthType.GOOGLE, value: googleId, verified: true },
+              { type: AuthType.EMAIL, value: email, verified: true },
+            ],
+          },
+        },
+        include: {
+          userSchools: { include: { school: true, role: true } },
+          school: true,
+          role: true,
+        },
+      });
     }
 
-    // Get permissions
-    const permissions = await this.extractPermissions(user.id, user.roleId);
-    const email = await this.getUserEmail(user.id);
+    if (!user.isActive) {
+      throw new UnauthorizedException('User account is inactive');
+    }
 
-    const payload: AuthUserPayload = {
-      id: user.id,
-      email,
-      schoolId: user.schoolId,
-      role: user.role.name as UserRole,
-      permissions,
-      academicYearId: academicYear.id,
-      academicYearName: academicYear.name,
+    // Tenant Check: If schoolId was provided in OAuth state, verify user belongs to it
+    if (schoolIdFromState) {
+      const hasMembership = user.userSchools.some(
+        (m: any) => m.schoolId === schoolIdFromState,
+      );
+      const isGlobalAdmin = user.role?.name === 'SAAS_ADMIN';
+
+      if (!hasMembership && !isGlobalAdmin && user.schoolId !== schoolIdFromState) {
+        throw new UnauthorizedException('User does not belong to the requested school');
+      }
+    }
+
+    this.logger.log(`Google login success for userId: ${user.id}`);
+    return this.handlePostLogin(user, email, meta);
+  }
+
+
+  // ==========================
+  // OTP AUTHENTICATION
+  // ==========================
+
+  async requestOtp(
+    identifier: string,
+    type: 'EMAIL' | 'PHONE',
+    meta?: { ip?: string; userAgent?: string },
+  ) {
+    return this.otpService.generateAndSendOtp(identifier, AuthType[type], meta);
+  }
+
+  async verifyOtpAndLogin(
+    identifier: string,
+    code: string,
+    type: 'EMAIL' | 'PHONE',
+    meta?: { ip?: string; userAgent?: string },
+  ) {
+    const normalizedIdentifier = identifier.toLowerCase().trim();
+    this.logger.log(`Verifying OTP for ${this.maskIdentifier(normalizedIdentifier)}`);
+
+    // 1. Verify the OTP
+    await this.otpService.verifyOtp(normalizedIdentifier, code, AuthType[type]);
+
+    // 2. Find or Create User
+    const identity = await this.prisma.authIdentity.findUnique({
+      where: { type_value: { type: AuthType[type], value: normalizedIdentifier } },
+      include: {
+        user: {
+          include: {
+            userSchools: { include: { school: true, role: true } },
+            school: true,
+            role: true,
+          },
+        },
+      },
+    });
+
+    let user;
+    if (identity) {
+      if (!identity.verified) {
+        await this.prisma.authIdentity.update({
+          where: { id: identity.id },
+          data: { verified: true },
+        });
+      }
+      user = identity.user;
+    } else {
+      // Create new global user securely
+      user = await this.prisma.user.create({
+        data: {
+          name: normalizedIdentifier.split('@')[0],
+          authIdentities: {
+            create: [
+              {
+                type: AuthType[type],
+                value: normalizedIdentifier,
+                verified: true,
+              },
+            ],
+          },
+        },
+        include: {
+          userSchools: { include: { school: true, role: true } },
+          school: true,
+          role: true,
+        },
+      });
+    }
+
+    return this.handlePostLogin(
+      user,
+      type === 'EMAIL' ? normalizedIdentifier : undefined,
+      meta,
+    );
+  }
+
+  // ==========================
+  // POST-LOGIN HANDLER
+  // ==========================
+
+  private async handlePostLogin(
+    user: any,
+    email?: string,
+    meta?: { ip?: string; userAgent?: string },
+  ) {
+    if (!user.isActive) {
+      throw new UnauthorizedException('User account is inactive');
+    }
+
+    const memberships = user.userSchools || [];
+    this.logger.log(`Post-login for user ${user.id}: ${memberships.length} memberships`);
+
+    // Determine if we can auto-select a school/role:
+    // 1. If there's an explicit primary membership
+    // 2. OR if there's ONLY one membership
+    let primaryMembership = memberships.find((m: any) => m.isPrimary) || (memberships.length === 1 ? memberships[0] : null);
+
+    // Fallback info from the user record directly (for staff on a single school)
+    // BUT: If the user has multiple overlapping memberships, we ignore the direct schoolId fallback 
+    // to force the "Select School" selector.
+    let selectedSchool = primaryMembership?.school;
+    let selectedRole = primaryMembership?.role?.name || (memberships.length <= 1 ? user.role?.name : null);
+    let selectedSchoolId = primaryMembership?.schoolId || (memberships.length <= 1 ? user.schoolId : null);
+
+    let resolvedSubdomain = '';
+
+    if (!primaryMembership && memberships.length <= 1 && user.schoolId) {
+      const school = user.school || await this.prisma.school.findUnique({ where: { id: user.schoolId } });
+      if (school) {
+        selectedSchool = school;
+        resolvedSubdomain = school.subdomain;
+      }
+    }
+
+    if (primaryMembership) {
+      resolvedSubdomain = this.resolveSubdomainForMembership(primaryMembership);
+      selectedSchool = primaryMembership.school;
+      selectedRole = primaryMembership.role?.name;
+      selectedSchoolId = primaryMembership.schoolId;
+    }
+
+    if (selectedSchoolId && selectedRole) {
+
+      const tokens = await this.generateTokens(
+        user.id,
+        selectedSchoolId,
+        user.roleId || (primaryMembership?.roleId),
+        email,
+        selectedRole,
+        resolvedSubdomain,
+        meta,
+      );
+
+      let activeYear: { id: number } | null = null;
+      try {
+        activeYear = await this.prisma.academicYear.findFirst({
+          where: { schoolId: selectedSchoolId, status: 'ACTIVE' },
+          select: { id: true },
+          orderBy: { startDate: 'desc' },
+        });
+      } catch (err) {
+        this.logger.error(`Failed to fetch active academic year: ${err.message}`);
+      }
+
+      if (selectedSchoolId) {
+        await this.createAuditLog(selectedSchoolId, user.id, 'LOGIN', meta?.ip);
+      }
+
+      return {
+        user: { id: user.id, name: user.name, memberships, role: selectedRole },
+        school: {
+          ...selectedSchool,
+          subdomain: resolvedSubdomain || selectedSchool?.subdomain,
+        },
+        academicYearId: activeYear?.id,
+        ...tokens,
+      };
+    }
+
+    if (memberships.length === 0 && !user.schoolId && user.role) {
+      const tokens = await this.generateTokens(
+        user.id,
+        undefined,
+        user.roleId,
+        email,
+        user.role.name,
+        undefined,
+        meta,
+      );
+      return {
+        user: { id: user.id, name: user.name, role: user.role.name, memberships: [] },
+        message: `Logged in as global ${user.role.name}`,
+        ...tokens,
+      };
+    }
+
+    const tokens = await this.generateTokens(user.id, undefined, undefined, email, undefined, undefined, meta);
+    const membershipsWithResolvedSubdomain = memberships.map((m: any) => ({
+      ...m,
+      school: m.school ? {
+        ...m.school,
+        subdomain: this.resolveSubdomainForMembership(m) || m.school?.subdomain,
+      } : m.school,
+    }));
+
+    return {
+      message: memberships.length === 0 ? 'No school memberships found.' : 'Multiple schools found. Please select a school.',
+      requireSchoolSelection: memberships.length > 0,
+      user: { id: user.id, name: user.name, memberships: membershipsWithResolvedSubdomain },
+      ...tokens,
     };
+  }
 
-    const accessToken = await this.jwt.signAsync(payload);
+  // ==========================
+  // PASSWORD AUTHENTICATION
+  // ==========================
 
+  async signin(
+    email: string,
+    password?: string,
+    schoolCode?: string,
+    meta?: { ip?: string; userAgent?: string },
+  ) {
+    const normalizedEmail = email.toLowerCase().trim();
+    // 1. Find the local identity
+    const identity = await this.prisma.authIdentity.findUnique({
+      where: { type_value: { type: AuthType.EMAIL, value: normalizedEmail } },
+      include: {
+        user: {
+          include: {
+            userSchools: { include: { school: true, role: true } },
+            school: true,
+            role: true, // Global role
+          },
+        },
+      },
+    });
+
+    if (!identity) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    // 2. Verify password (Require for EMAIL type)
+    if (!password) {
+      throw new UnauthorizedException('Password is required for email login');
+    }
+
+    if (identity.secret) {
+      const isHashed = identity.secret.startsWith('$argon2');
+      let isPasswordValid = false;
+
+      if (isHashed) {
+        isPasswordValid = await argon2.verify(identity.secret, password);
+      } else {
+        // Migration logic: Handle plain text passwords
+        isPasswordValid = identity.secret === password;
+        if (isPasswordValid) {
+          const newHash = await argon2.hash(password);
+          await this.prisma.authIdentity.update({
+            where: { id: identity.id },
+            data: { secret: newHash },
+          });
+          this.logger.log(`Migrated plain-text password for identity: ${identity.id}`);
+        }
+      }
+
+      if (!isPasswordValid) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+    } else {
+      throw new UnauthorizedException('Please sign in with Google');
+    }
+
+    // 3. Handle school filtering if schoolCode is provided
+    if (schoolCode && identity.user.userSchools.length > 0) {
+      const targetMembership = identity.user.userSchools.find(
+        (m) => m.school.code.toLowerCase() === schoolCode.toLowerCase(),
+      );
+
+      if (targetMembership) {
+        const resolvedSubdomain = this.resolveSubdomainForMembership(targetMembership);
+        const tokens = await this.generateTokens(
+          identity.user.id,
+          targetMembership.schoolId,
+          targetMembership.roleId,
+          email,
+          targetMembership.role.name,
+          resolvedSubdomain,
+          meta,
+        );
+        return {
+          ...tokens,
+          user: {
+            id: identity.user.id,
+            name: identity.user.name,
+            role: targetMembership.role.name,
+          },
+          school: {
+            ...targetMembership.school,
+            subdomain: resolvedSubdomain || targetMembership.school?.subdomain,
+          },
+        };
+      }
+    }
+
+    // 4. Fallback to normal post-login
+    return this.handlePostLogin(identity.user, email, meta);
+  }
+
+  // ==========================
+  // SCHOOL SELECTION
+  // ==========================
+
+  async selectSchool(
+    userId: number,
+    schoolId: number,
+    meta?: { ip?: string; userAgent?: string },
+  ) {
+    const membership = await this.prisma.userSchool.findUnique({
+      where: { userId_schoolId: { userId, schoolId } },
+      include: {
+        user: { include: { role: true } },
+        school: true,
+        role: true,
+      },
+    });
+
+    if (!membership || !membership.isActive) {
+      throw new UnauthorizedException('Invalid or inactive school membership');
+    }
+
+    const emailIdentity = await this.prisma.authIdentity.findFirst({
+      where: { userId, type: AuthType.EMAIL },
+    });
+
+    const resolvedSubdomain = this.resolveSubdomainForMembership(membership);
+    const tokens = await this.generateTokens(
+      userId,
+      membership.schoolId,
+      membership.roleId,
+      emailIdentity?.value,
+      membership.role?.name,
+      resolvedSubdomain,
+      meta,
+    );
+
+    let activeYear: { id: number } | null = null;
+    try {
+      activeYear = await this.prisma.academicYear.findFirst({
+        where: { schoolId, status: 'ACTIVE' },
+        select: { id: true },
+        orderBy: { startDate: 'desc' },
+      });
+    } catch (err) {
+      this.logger.error(`Failed to fetch active academic year: ${err.message}`);
+    }
+
+    return {
+      ...tokens,
+      academicYearId: activeYear?.id,
+      school: {
+        ...membership.school,
+        subdomain: resolvedSubdomain || membership.school?.subdomain,
+      },
+      role: membership.role ? { id: membership.role.id, name: membership.role.name } : undefined,
+    };
+  }
+
+  // ==========================
+  // REFRESH TOKENS
+  // ==========================
+
+  async refreshToken(
+    rawRefreshToken: string,
+    meta?: { ip?: string; userAgent?: string },
+  ) {
+    const tokenHash = crypto.createHash('sha256').update(rawRefreshToken).digest('hex');
+
+    const authToken = await this.prisma.authToken.findUnique({
+      where: { tokenHash },
+      include: {
+        user: {
+          include: {
+            userSchools: { include: { school: true, role: true } },
+            role: true,
+          },
+        },
+      },
+    });
+
+    if (!authToken || authToken.expiresAt < new Date()) {
+      if (authToken) await this.prisma.authToken.delete({ where: { id: authToken.id } });
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
+
+    // Refresh Token Context Preservation
+    const user = authToken.user;
+    const schoolId = authToken.schoolId;
+    const roleId = authToken.roleId;
+
+    // Device Metadata Check (Optional/Warning)
+    if (authToken.ip && meta?.ip && authToken.ip !== meta.ip) {
+      this.logger.warn(`Refresh token IP mismatch for user ${user.id}. Original: ${authToken.ip}, Current: ${meta.ip}`);
+    }
+
+    // Rotate token
+    await this.prisma.authToken.delete({ where: { id: authToken.id } });
+
+    // Find email
+    const emailIdentity = await this.prisma.authIdentity.findFirst({
+      where: { userId: user.id, type: AuthType.EMAIL },
+    });
+
+    // If we had context, use it.
+    if (schoolId && roleId) {
+      const membership = user.userSchools.find((m: any) => m.schoolId === schoolId && m.roleId === roleId);
+      const roleName = membership?.role?.name || (user.roleId === roleId ? user.role?.name : undefined);
+      const subdomain = membership ? this.resolveSubdomainForMembership(membership) : undefined;
+
+      return {
+        ...(await this.generateTokens(
+          user.id,
+          schoolId,
+          roleId,
+          emailIdentity?.value,
+          roleName,
+          subdomain,
+          meta,
+        )),
+        user: { id: user.id, name: user.name, role: roleName },
+      };
+    }
+
+    // Fallback to base login flow (auto-select if 1)
+    return this.handlePostLogin(user, emailIdentity?.value, meta);
+  }
+
+  // ==========================
+  // PROFILE HANDLER
+  // ==========================
+
+  async getMe(payload: AuthUserPayload) {
+    if (payload.roleId) {
+      const role = await this.prisma.role.findUnique({
+        where: { id: payload.roleId },
+        select: { name: true },
+      });
+      return { ...payload, role: role?.name };
+    }
     return payload;
+  }
+
+  async revokeTokens(userId: number) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { tokenVersion: { increment: 1 } },
+    });
+    this.logger.log(`Tokens revoked for user ${userId}`);
   }
 }

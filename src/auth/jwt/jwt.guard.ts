@@ -9,7 +9,8 @@ import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
 import { Reflector } from '@nestjs/core';
 import { PrismaService } from '../../prisma/prisma.service';
-import type { AuthUserPayload, UserRole } from '../auth.service';
+import { ConfigService } from '@nestjs/config';
+import type { AuthUserPayload } from '../auth.service';
 
 export const SCHOOL_ID_HEADER = 'x-school-id';
 export const ACADEMIC_YEAR_HEADER = 'x-academic-year-id';
@@ -24,6 +25,7 @@ export class JwtAuthGuard implements CanActivate {
     private readonly jwt: JwtService,
     private readonly prisma: PrismaService,
     private readonly reflector: Reflector,
+    private readonly config: ConfigService,
   ) { }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -45,64 +47,45 @@ export class JwtAuthGuard implements CanActivate {
     }
 
     try {
-      const decoded = await this.jwt.verifyAsync<AuthUserPayload>(token);
+      const decoded = await this.jwt.verifyAsync<AuthUserPayload>(token, {
+        secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+        algorithms: ['HS256'],
+        issuer: this.config.get<string>('JWT_ISSUER'),
+        audience: this.config.get<string>('JWT_AUDIENCE'),
+        clockTolerance: 5,
+      });
 
-      // Verify user still exists and is active
+      if (!decoded.sub || !decoded.tokenVersion) {
+        throw new UnauthorizedException('Invalid token payload');
+      }
+
+      // Verify tenant context if header is present
+      const schoolIdHeader = req.headers[SCHOOL_ID_HEADER];
+      if (schoolIdHeader) {
+        const schoolId = parseInt(schoolIdHeader as string);
+        if (decoded.schoolId && decoded.schoolId !== schoolId) {
+          throw new ForbiddenException('Invalid tenant context');
+        }
+      }
+
+      // Verify token version against DB (Revocation check)
       const user = await this.prisma.user.findUnique({
-        where: {
-          id: decoded.id,
-          schoolId: decoded.schoolId,
-          isActive: true,
-        },
-        include: {
-          school: {
-            select: {
-              isActive: true,
-            },
-          },
-        },
+        where: { id: decoded.sub, isActive: true },
+        select: { tokenVersion: true },
       });
 
       if (!user) {
         throw new UnauthorizedException('User not found or inactive');
       }
 
-      if (!user.school.isActive) {
-        throw new ForbiddenException('School is inactive');
-      }
-
-      // Validate school ID from header matches token
-      const schoolIdHeader = req.headers[SCHOOL_ID_HEADER] as string;
-      if (schoolIdHeader && parseInt(schoolIdHeader) !== decoded.schoolId) {
-        throw new ForbiddenException('School ID mismatch');
-      }
-
-      // Validate academic year if provided
-      const academicYearHeader = req.headers[ACADEMIC_YEAR_HEADER] as string;
-      if (academicYearHeader) {
-        const academicYearId = parseInt(academicYearHeader);
-
-        // Verify academic year belongs to user's school
-        const academicYear = await this.prisma.academicYear.findFirst({
-          where: {
-            id: academicYearId,
-            schoolId: decoded.schoolId,
-          },
-        });
-
-        if (!academicYear) {
-          throw new ForbiddenException('Invalid academic year');
-        }
-
-        // Add to decoded user for easy access
-        decoded.academicYearId = academicYear.id;
-        decoded.academicYearName = academicYear.name;
+      if (user.tokenVersion !== decoded.tokenVersion) {
+        throw new UnauthorizedException('Token revoked');
       }
 
       req.user = decoded;
       return true;
     } catch (error) {
-      if (error instanceof ForbiddenException) {
+      if (error instanceof ForbiddenException || error instanceof UnauthorizedException) {
         throw error;
       }
       throw new UnauthorizedException('Invalid or expired token');
@@ -113,9 +96,12 @@ export class JwtAuthGuard implements CanActivate {
 /* -------- PERMISSION GUARD -------- */
 @Injectable()
 export class PermissionGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector) { }
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly prisma: PrismaService,
+  ) { }
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const requiredPermissions = this.reflector.get<string[]>(
       'permissions',
       context.getHandler(),
@@ -126,14 +112,18 @@ export class PermissionGuard implements CanActivate {
     }
 
     const req = context.switchToHttp().getRequest<RequestWithUser>();
-    const user = req.user;
+    const userPayload = req.user;
 
-    if (!user) {
-      throw new UnauthorizedException('User not authenticated');
+    if (!userPayload || !userPayload.sub || !userPayload.roleId) {
+      throw new UnauthorizedException(
+        'User not authenticated or no active role selected',
+      );
     }
 
-    const hasPermission = requiredPermissions.some(permission =>
-      user.permissions.includes(permission),
+    const activePermissions = new Set(userPayload.permissions || []);
+
+    const hasPermission = requiredPermissions.some((permission) =>
+      activePermissions.has(permission),
     );
 
     if (!hasPermission) {
@@ -149,10 +139,13 @@ export class PermissionGuard implements CanActivate {
 /* -------- ROLE GUARD -------- */
 @Injectable()
 export class RoleGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector) { }
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly prisma: PrismaService,
+  ) { }
 
-  canActivate(context: ExecutionContext): boolean {
-    const requiredRoles = this.reflector.get<UserRole[]>(
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const requiredRoles = this.reflector.get<string[]>(
       'roles',
       context.getHandler(),
     );
@@ -162,13 +155,15 @@ export class RoleGuard implements CanActivate {
     }
 
     const req = context.switchToHttp().getRequest<RequestWithUser>();
-    const user = req.user;
+    const userPayload = req.user;
 
-    if (!user) {
-      throw new UnauthorizedException('User not authenticated');
+    if (!userPayload || !userPayload.sub || !userPayload.roleId) {
+      throw new UnauthorizedException(
+        'User not authenticated or no role selected',
+      );
     }
 
-    const hasRole = requiredRoles.includes(user.role);
+    const hasRole = requiredRoles.includes(userPayload.role || '');
 
     if (!hasRole) {
       throw new ForbiddenException(

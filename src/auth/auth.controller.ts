@@ -1,71 +1,48 @@
 import {
-  Body,
   Controller,
   Get,
-  Headers,
   Post,
-  Patch,
+  Body,
+  UseGuards,
+  Req,
   UnauthorizedException,
+  Headers,
+  Query,
   Ip,
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
-import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
+import { GoogleAuthGuard } from './google-auth.guard';
+import { JwtAuthGuard } from './jwt/jwt.guard';
+import { IsNotEmpty, IsString, IsEnum, IsOptional } from 'class-validator';
+import { AuthType } from '@prisma/client';
 
-class LoginDto {
-  @IsEmail()
+class SigninDto {
+  @IsString()
   @IsNotEmpty()
   email: string;
 
-  @IsNotEmpty()
-  password: string;
-
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  schoolCode: string;
+  password?: string;
+
+  @IsOptional()
+  @IsString()
+  schoolCode?: string;
 }
 
-class SwitchAcademicYearDto {
-  @IsNotEmpty()
-  academicYearId: number;
-}
 
-class ForgotPasswordDto {
-  @IsEmail()
-  @IsNotEmpty()
-  email: string;
-
-  @IsString()
-  @IsNotEmpty()
-  schoolCode: string;
-}
-
-class ResetPasswordDto {
-  @IsString()
-  @IsNotEmpty()
-  token: string;
-
-  @IsString()
-  @MinLength(8, { message: 'Password must be at least 8 characters long' })
-  newPassword: string;
-}
-
-class RefreshTokenDto {
-  @IsString()
-  @IsNotEmpty()
-  token: string;
-}
 
 class OtpRequestDto {
   @IsString()
   @IsNotEmpty()
   identifier: string;
 
-  @IsString()
+  @IsEnum(AuthType)
   @IsNotEmpty()
   type: 'EMAIL' | 'PHONE';
 }
 
-class OtpLoginDto {
+class OtpVerifyDto {
   @IsString()
   @IsNotEmpty()
   identifier: string;
@@ -73,155 +50,113 @@ class OtpLoginDto {
   @IsString()
   @IsNotEmpty()
   code: string;
+
+  @IsEnum(AuthType)
+  @IsNotEmpty()
+  type: 'EMAIL' | 'PHONE';
+}
+
+class SelectSchoolDto {
+  @IsNotEmpty()
+  schoolId: number;
+}
+
+class RefreshDto {
+  @IsString()
+  @IsNotEmpty()
+  refreshToken: string;
 }
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) { }
+  constructor(private readonly authService: AuthService) { }
 
-  @Post('login')
-  async login(
-    @Body() body: LoginDto,
-    @Ip() ip: string,
-  ) {
-    if (!body.schoolCode) {
-      throw new UnauthorizedException('School code is required');
+  // ==========================
+  // GOOGLE OAUTH
+  // ==========================
+
+  @Get('google')
+  @UseGuards(GoogleAuthGuard)
+  async googleAuth(@Req() req) {
+    // Passport redirects to Google
+  }
+
+  @Get('google/callback')
+  @UseGuards(GoogleAuthGuard)
+  async googleAuthRedirect(@Req() req, @Ip() ip: string, @Headers('user-agent') ua: string) {
+    if (!req.user) {
+      throw new UnauthorizedException('Google authentication failed');
     }
 
-    const result = await this.auth.login(body.email, body.password, body.schoolCode);
-
-    // Add IP address to audit log (handled in service)
-    return result;
+    return this.authService.validateGoogleUser(req.user, { ip, userAgent: ua });
   }
 
-  @Post('forgot-password')
-  async forgotPassword(@Body() body: ForgotPasswordDto) {
-    if (!body.schoolCode) {
-      throw new UnauthorizedException('School code is required');
-    }
-    return this.auth.requestPasswordReset(body.email, body.schoolCode);
+  @Post('signin')
+  async signin(@Body() body: SigninDto, @Ip() ip: string, @Headers('user-agent') ua: string) {
+    return this.authService.signin(body.email, body.password, body.schoolCode, {
+      ip,
+      userAgent: ua,
+    });
   }
 
-  @Post('reset-password')
-  async resetPassword(@Body() body: ResetPasswordDto) {
-    return this.auth.resetPassword(body.token, body.newPassword);
-  }
-
-  @Post('refresh')
-  async refresh(@Body() body: RefreshTokenDto) {
-    return this.auth.rotateRefreshToken(body.token);
-  }
+  // ==========================
+  // OTP AUTHENTICATION
+  // ==========================
 
   @Post('otp/request')
-  async requestOtp(@Body() body: OtpRequestDto) {
-    return this.auth.sendOtp(body.identifier, body.type);
+  async requestOtp(@Body() body: OtpRequestDto, @Ip() ip: string, @Headers('user-agent') ua: string) {
+    return this.authService.requestOtp(body.identifier, body.type, { ip, userAgent: ua });
   }
 
-  @Post('otp/login')
-  async loginOtp(
-    @Body() body: OtpLoginDto,
-    @Ip() ip: string,
-  ) {
-    const result = await this.auth.loginWithOtp(body.identifier, body.code);
-
-    // Audit Log is handled in Service but IP needs to be passed? 
-    // Service loginWithOtp didn't take IP, maybe add it later or ignore for now.
-    // The previous logic for `login` had audit log in service, but IP empty.
-
-    return result;
+  @Post('otp/verify')
+  async verifyOtp(@Body() body: OtpVerifyDto, @Ip() ip: string, @Headers('user-agent') ua: string) {
+    return this.authService.verifyOtpAndLogin(
+      body.identifier,
+      body.code,
+      body.type,
+      { ip, userAgent: ua },
+    );
   }
 
-  @Post('verify')
-  async verify(@Headers('authorization') authHeader?: string) {
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      throw new UnauthorizedException('Missing or invalid token');
+  // ==========================
+  // POST-LOGIN FLOWS
+  // ==========================
+
+  @Post('select-school')
+  @UseGuards(JwtAuthGuard)
+  async selectSchool(@Req() req, @Body() body: SelectSchoolDto) {
+    // Current user context is from JWT (Base token with no school selection yet, or changing school)
+    if (!req.user?.sub) {
+      throw new UnauthorizedException('Invalid token structure');
     }
 
-    const token = authHeader.split(' ')[1];
-    return this.auth.verifyToken(token);
-  }
-
-  @Patch('switch-academic-year')
-  async switchAcademicYear(
-    @Headers('authorization') authHeader: string,
-    @Body() body: SwitchAcademicYearDto,
-  ) {
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      throw new UnauthorizedException('Missing or invalid token');
-    }
-
-    const token = authHeader.split(' ')[1];
-    const currentUser = await this.auth.verifyToken(token);
-
-    if (!currentUser) {
-      throw new UnauthorizedException('Invalid token');
-    }
-
-    const newPayload = await this.auth.switchAcademicYear(
-      currentUser.id,
-      currentUser.schoolId,
-      body.academicYearId,
+    const tokens = await this.authService.selectSchool(
+      req.user.sub,
+      body.schoolId,
+      { ip: req.ip, userAgent: req.headers['user-agent'] },
     );
 
-    const newToken = await this.auth['jwt'].signAsync(newPayload);
-
     return {
-      user: newPayload,
-      accessToken: newToken,
+      message: 'School selected successfully',
+      ...tokens,
     };
+  }
+
+  // ==========================
+  // TOKEN MANAGEMENT
+  // ==========================
+
+  @Post('refresh')
+  async refreshTokens(@Body() body: RefreshDto, @Ip() ip: string, @Headers('user-agent') ua: string) {
+    return this.authService.refreshToken(body.refreshToken, {
+      ip,
+      userAgent: ua,
+    });
   }
 
   @Get('me')
-  async getCurrentUser(@Headers('authorization') authHeader: string) {
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      throw new UnauthorizedException('Missing or invalid token');
-    }
-
-    const token = authHeader.split(' ')[1];
-    const user = await this.auth.verifyToken(token);
-
-    // Get fresh school info
-    const school = await this.auth['prisma'].school.findUnique({
-      where: { id: user.schoolId },
-      select: {
-        id: true,
-        name: true,
-        code: true,
-        // subdomain: true, // Removed
-      },
-    });
-
-    // Get available academic years for this school
-    const academicYears = await this.auth['prisma'].academicYear.findMany({
-      where: { schoolId: user.schoolId },
-      select: {
-        id: true,
-        name: true,
-        status: true,
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    return {
-      user,
-      school,
-      academicYears: academicYears.map(ay => ({
-        id: ay.id,
-        name: ay.name,
-        isActive: ay.status === 'ACTIVE',
-      })),
-      currentAcademicYear: academicYears
-        .filter(ay => ay.id === user.academicYearId)
-        .map(ay => ({
-          id: ay.id,
-          name: ay.name,
-          isActive: ay.status === 'ACTIVE',
-        }))[0],
-    };
-  }
-
-  @Get('health')
-  health() {
-    return { status: 'ok' };
+  @UseGuards(JwtAuthGuard)
+  async getProfile(@Req() req) {
+    return { user: await this.authService.getMe(req.user) };
   }
 }

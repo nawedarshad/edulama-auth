@@ -14,11 +14,13 @@ async function bootstrap() {
   app.use(helmet());
 
   // INPUT VALIDATION configuration
-  app.useGlobalPipes(new ValidationPipe({
-    whitelist: true, // properties not in DTO are stripped
-    forbidNonWhitelisted: true, // throw error if unknown properties
-    transform: true, // auto-transform payloads to DTO instances
-  }));
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true, // properties not in DTO are stripped
+      forbidNonWhitelisted: true, // throw error if unknown properties
+      transform: true, // auto-transform payloads to DTO instances
+    }),
+  );
 
   app.enableCors({
     origin: (origin, callback) => {
