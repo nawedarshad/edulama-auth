@@ -138,7 +138,7 @@ export class AuthService {
     };
 
     const accessToken = await this.jwt.signAsync(payload, {
-      expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '1h',
+      expiresIn: (process.env.JWT_ACCESS_EXPIRES_IN || '1h') as any,
     });
 
     // Generate refresh token manually
