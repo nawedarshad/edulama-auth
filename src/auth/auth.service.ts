@@ -137,7 +137,9 @@ export class AuthService {
       type: 'access',
     };
 
-    const accessToken = await this.jwt.signAsync(payload, { expiresIn: '15m' });
+    const accessToken = await this.jwt.signAsync(payload, {
+      expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '1h',
+    });
 
     // Generate refresh token manually
     const rawRefreshToken = crypto.randomBytes(40).toString('hex');
@@ -145,7 +147,8 @@ export class AuthService {
       .createHash('sha256')
       .update(rawRefreshToken)
       .digest('hex');
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+    const refreshTokenExpiresIn = process.env.JWT_REFRESH_EXPIRES_IN || '30d';
+    const expiresAt = new Date(Date.now() + (refreshTokenExpiresIn.endsWith('d') ? parseInt(refreshTokenExpiresIn) * 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000));
 
     await this.prisma.authToken.create({
       data: {
