@@ -216,7 +216,7 @@ export class AuthService {
       include: {
         user: {
           include: {
-            userSchools: { include: { school: true, role: true } },
+            userSchools: { include: { school: true, primaryRole: true, roles: { include: { role: true } } } },
             school: true,
             role: true,
           },
@@ -230,7 +230,7 @@ export class AuthService {
       include: {
         user: {
           include: {
-            userSchools: { include: { school: true, role: true } },
+            userSchools: { include: { school: true, primaryRole: true, roles: { include: { role: true } } } },
             school: true,
             role: true,
           },
@@ -252,7 +252,7 @@ export class AuthService {
         user = await this.prisma.user.findUnique({
           where: { id: emailIdentity.userId },
           include: {
-            userSchools: { include: { school: true, role: true } },
+            userSchools: { include: { school: true, primaryRole: true, roles: { include: { role: true } } } },
             school: true,
             role: true,
           },
@@ -284,9 +284,7 @@ export class AuthService {
           },
         },
         include: {
-          userSchools: { include: { school: true, role: true } },
-          school: true,
-          role: true,
+          userSchools: { include: { school: true, primaryRole: true } },
         },
       });
     }
@@ -342,7 +340,7 @@ export class AuthService {
       include: {
         user: {
           include: {
-            userSchools: { include: { school: true, role: true } },
+            userSchools: { include: { school: true, primaryRole: true, roles: { include: { role: true } } } },
             school: true,
             role: true,
           },
@@ -375,7 +373,7 @@ export class AuthService {
           },
         },
         include: {
-          userSchools: { include: { school: true, role: true } },
+          userSchools: { include: { school: true, primaryRole: true, roles: { include: { role: true } } } },
           school: true,
           role: true,
         },
@@ -414,7 +412,10 @@ export class AuthService {
     // BUT: If the user has multiple overlapping memberships, we ignore the direct schoolId fallback 
     // to force the "Select School" selector.
     let selectedSchool = primaryMembership?.school;
-    let selectedRole = primaryMembership?.role?.name || (memberships.length <= 1 ? user.role?.name : null);
+    let selectedRole = primaryMembership?.primaryRole?.name || (memberships.length <= 1 ? user.role?.name : null);
+    let selectedRoleId = primaryMembership?.primaryRoleId ?? null;
+    // allRoles contains the full role list for this membership (for role-switcher UI)
+    let allRoles: string[] = primaryMembership?.roles?.map((r: any) => r.role?.name).filter(Boolean) ?? [];
     let selectedSchoolId = primaryMembership?.schoolId || (memberships.length <= 1 ? user.schoolId : null);
 
     let resolvedSubdomain = '';
@@ -523,7 +524,7 @@ export class AuthService {
       include: {
         user: {
           include: {
-            userSchools: { include: { school: true, role: true } },
+            userSchools: { include: { school: true, primaryRole: true, roles: { include: { role: true } } } },
             school: true,
             role: true, // Global role
           },
@@ -577,9 +578,9 @@ export class AuthService {
         const tokens = await this.generateTokens(
           identity.user.id,
           targetMembership.schoolId,
-          targetMembership.roleId,
+          targetMembership.primaryRoleId ?? undefined,
           email,
-          targetMembership.role.name,
+          targetMembership.primaryRole?.name,
           resolvedSubdomain,
           meta,
         );
@@ -588,7 +589,7 @@ export class AuthService {
           user: {
             id: identity.user.id,
             name: identity.user.name,
-            role: targetMembership.role.name,
+            role: targetMembership.primaryRole?.name,
           },
           school: {
             ...targetMembership.school,
@@ -616,13 +617,19 @@ export class AuthService {
       include: {
         user: { include: { role: true } },
         school: true,
-        role: true,
+        primaryRole: true,                     // The primary/active role for JWT
+        roles: { include: { role: true } },    // All roles (for role-switcher UI)
       },
     });
 
     if (!membership || !membership.isActive) {
       throw new UnauthorizedException('Invalid or inactive school membership');
     }
+
+    // Resolve active role — prefer primaryRole, fall back to first assigned role
+    const activeRole = membership.primaryRole ?? membership.roles?.[0]?.role;
+    const activeRoleId = membership.primaryRoleId ?? membership.roles?.[0]?.roleId;
+    const allRoles = membership.roles?.map((r: any) => ({ id: r.role?.id, name: r.role?.name })).filter(Boolean) ?? [];
 
     const emailIdentity = await this.prisma.authIdentity.findFirst({
       where: { userId, type: AuthType.EMAIL },
@@ -632,9 +639,9 @@ export class AuthService {
     const tokens = await this.generateTokens(
       userId,
       membership.schoolId,
-      membership.roleId,
+      activeRoleId,
       emailIdentity?.value,
-      membership.role?.name,
+      activeRole?.name,
       resolvedSubdomain,
       meta,
     );
@@ -657,7 +664,8 @@ export class AuthService {
         ...membership.school,
         subdomain: resolvedSubdomain || membership.school?.subdomain,
       },
-      role: membership.role ? { id: membership.role.id, name: membership.role.name } : undefined,
+      role: activeRole ? { id: activeRole.id, name: activeRole.name } : undefined,
+      allRoles, // Full role list for the role-switcher on client
     };
   }
 
@@ -676,8 +684,7 @@ export class AuthService {
       include: {
         user: {
           include: {
-            userSchools: { include: { school: true, role: true } },
-            role: true,
+            userSchools: { include: { school: true, primaryRole: true, roles: { include: { role: true } } } },
           },
         },
       },
@@ -708,8 +715,9 @@ export class AuthService {
 
     // If we had context, use it.
     if (schoolId && roleId) {
-      const membership = user.userSchools.find((m: any) => m.schoolId === schoolId && m.roleId === roleId);
-      const roleName = membership?.role?.name || (user.roleId === roleId ? user.role?.name : undefined);
+      const membership = user.userSchools.find((m: any) => m.schoolId === schoolId && (m.primaryRoleId === roleId || m.roles?.some((r: any) => r.roleId === roleId)));
+      const activeRole = membership?.primaryRoleId === roleId ? membership.primaryRole : membership?.roles?.find((r: any) => r.roleId === roleId)?.role;
+      const roleName = activeRole?.name;
       const subdomain = membership ? this.resolveSubdomainForMembership(membership) : undefined;
 
       return {

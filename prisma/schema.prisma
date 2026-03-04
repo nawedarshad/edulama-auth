@@ -146,22 +146,46 @@ model AuthIdentity {
 // ==========================
 
 model UserSchool {
-  id       Int     @id @default(autoincrement())
+  id       Int @id @default(autoincrement())
   userId   Int
   schoolId Int
-  roleId   Int
+
+  // Primary role used for JWT generation and dashboard selection.
+  // Full role list is in UserSchoolRole.
+  primaryRoleId Int?
+
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  role   Role   @relation(fields: [roleId], references: [id])
+  user        User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  school      School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  primaryRole Role?  @relation("PrimaryRole", fields: [primaryRoleId], references: [id])
+
+  roles UserSchoolRole[]
 
   @@unique([userId, schoolId])
   @@index([userId])
   @@index([schoolId])
+}
+
+// ==========================
+// USER SCHOOL ROLE (MULTI-ROLE JUNCTION)
+// ==========================
+
+model UserSchoolRole {
+  id           Int @id @default(autoincrement())
+  userSchoolId Int
+  roleId       Int
+
+  assignedAt DateTime @default(now())
+
+  userSchool UserSchool @relation(fields: [userSchoolId], references: [id], onDelete: Cascade)
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userSchoolId, roleId])
+  @@index([userSchoolId])
 }
 
 // ==========================
@@ -235,7 +259,8 @@ model Role {
   userRoles       UserRole[]
   rolePermissions RolePermission[]
   uiFeatureRoles  UiFeatureRole[]
-  userSchools     UserSchool[]
+  primarySchools  UserSchool[]     @relation("PrimaryRole")
+  userSchoolRoles UserSchoolRole[]
 }
 
 model UserRole {

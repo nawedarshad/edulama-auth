@@ -72,6 +72,15 @@ export class AuthController {
   constructor(private readonly authService: AuthService) { }
 
   // ==========================
+  // HEALTH CHECK
+  // ==========================
+
+  @Get('health')
+  checkHealth() {
+    return { status: 'ok', service: 'auth-ms', timestamp: new Date().toISOString() };
+  }
+
+  // ==========================
   // GOOGLE OAUTH
   // ==========================
 
