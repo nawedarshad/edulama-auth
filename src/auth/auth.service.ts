@@ -18,7 +18,10 @@ export interface AuthUserPayload {
   role?: string; // Role name
   subdomain?: string;
   email?: string;
+  schoolType?: string; // SCHOOL | COACHING | COLLEGE
+  modules: string[];   // Enabled module keys for this school
   tokenVersion: number;
+  permissionVersion: number; // Increment to invalidate all JWTs
   permissions: string[];
   type: 'access' | 'refresh';
 }
@@ -125,6 +128,27 @@ export class AuthService {
       );
     }
 
+    // 3. Fetch school type + enabled modules + permissionVersion in a single query
+    let schoolType: string | undefined;
+    let enabledModules: string[] = [];
+    let permissionVersion = 1;
+    if (schoolId) {
+      const school = await this.prisma.school.findUnique({
+        where: { id: schoolId },
+        select: {
+          type: true,
+          permissionVersion: true,
+          schoolModules: {
+            where: { enabled: true },
+            include: { module: { select: { key: true } } },
+          },
+        },
+      });
+      schoolType = school?.type as string | undefined;
+      permissionVersion = school?.permissionVersion ?? 1;
+      enabledModules = school?.schoolModules.map(sm => sm.module.key) ?? [];
+    }
+
     const payload: AuthUserPayload = {
       sub: userId,
       schoolId: schoolId || undefined,
@@ -132,6 +156,9 @@ export class AuthService {
       role,
       subdomain,
       email,
+      schoolType,
+      modules: enabledModules,
+      permissionVersion,
       tokenVersion: user.tokenVersion,
       permissions,
       type: 'access',
