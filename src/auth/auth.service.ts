@@ -431,8 +431,33 @@ export class AuthService {
     if (primaryMembership) {
       resolvedSubdomain = this.resolveSubdomainForMembership(primaryMembership);
       selectedSchool = primaryMembership.school;
-      selectedRole = primaryMembership.role?.name;
       selectedSchoolId = primaryMembership.schoolId;
+
+      // 1. Try Primary Role (most specific)
+      selectedRole = primaryMembership.primaryRole?.name;
+      selectedRoleId = primaryMembership.primaryRoleId;
+
+      // 2. Fallback to first role in membership.roles if available
+      if (!selectedRole && primaryMembership.roles?.length > 0) {
+        const firstRole = primaryMembership.roles[0].role;
+        selectedRole = firstRole?.name;
+        selectedRoleId = firstRole?.id;
+      }
+
+      // 3. Fallback to global user.role if only one school
+      if (!selectedRole && memberships.length === 1) {
+        selectedRole = user.role?.name;
+        selectedRoleId = user.roleId;
+      }
+    }
+
+    // Fallback if no primaryMembership but we have direct user.schoolId
+    if (!selectedSchoolId && user.schoolId && memberships.length === 1) {
+      selectedSchoolId = user.schoolId;
+      selectedSchool = user.school || await this.prisma.school.findUnique({ where: { id: user.schoolId } });
+      selectedRole = user.role?.name;
+      selectedRoleId = user.roleId;
+      if (selectedSchool) resolvedSubdomain = selectedSchool.subdomain;
     }
 
     if (selectedSchoolId && selectedRole) {
@@ -462,8 +487,14 @@ export class AuthService {
         await this.createAuditLog(selectedSchoolId, user.id, 'LOGIN', meta?.ip);
       }
 
+      // Ensure memberships have a flattened role for display in frontend selector if we fall through
+      const formattedMemberships = memberships.map((m: any) => ({
+        ...m,
+        role: m.primaryRole || (m.roles && m.roles.length > 0 ? m.roles[0].role : user.role)
+      }));
+
       return {
-        user: { id: user.id, name: user.name, memberships, role: selectedRole },
+        user: { id: user.id, name: user.name, memberships: formattedMemberships, role: selectedRole },
         school: {
           ...selectedSchool,
           subdomain: resolvedSubdomain || selectedSchool?.subdomain,
@@ -493,6 +524,7 @@ export class AuthService {
     const tokens = await this.generateTokens(user.id, undefined, undefined, email, undefined, undefined, meta);
     const membershipsWithResolvedSubdomain = memberships.map((m: any) => ({
       ...m,
+      role: m.primaryRole || m.roles?.[0]?.role, // Frontend expects 'role'
       school: m.school ? {
         ...m.school,
         subdomain: this.resolveSubdomainForMembership(m) || m.school?.subdomain,
@@ -501,7 +533,7 @@ export class AuthService {
 
     return {
       message: memberships.length === 0 ? 'No school memberships found.' : 'Multiple schools found. Please select a school.',
-      requireSchoolSelection: memberships.length > 0,
+      requireSchoolSelection: memberships.length > 1,
       user: { id: user.id, name: user.name, memberships: membershipsWithResolvedSubdomain },
       ...tokens,
     };
@@ -630,6 +662,11 @@ export class AuthService {
     const activeRole = membership.primaryRole ?? membership.roles?.[0]?.role;
     const activeRoleId = membership.primaryRoleId ?? membership.roles?.[0]?.roleId;
     const allRoles = membership.roles?.map((r: any) => ({ id: r.role?.id, name: r.role?.name })).filter(Boolean) ?? [];
+
+    if (!activeRole || !activeRoleId) {
+      this.logger.error(`User ${userId} attempted to select school ${schoolId} but lacks a valid primaryRole mapping.`);
+      throw new UnauthorizedException('Your account is pending role assignment for this school. Please contact the administrator.');
+    }
 
     const emailIdentity = await this.prisma.authIdentity.findFirst({
       where: { userId, type: AuthType.EMAIL },
