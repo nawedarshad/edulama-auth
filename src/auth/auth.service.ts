@@ -349,6 +349,8 @@ export class AuthService {
     });
 
     let user;
+    let isFirstLogin = false;
+
     if (identity) {
       if (!identity.verified) {
         await this.prisma.authIdentity.update({
@@ -357,6 +359,21 @@ export class AuthService {
         });
       }
       user = identity.user;
+
+      // OTP-First Login logic: Activate inactive users on first successful OTP
+      if (!user.isActive) {
+        isFirstLogin = true;
+        user = await this.prisma.user.update({
+          where: { id: user.id },
+          data: { isActive: true },
+          include: {
+            userSchools: { include: { school: true, primaryRole: true, roles: { include: { role: true } } } },
+            school: true,
+            role: true,
+          },
+        });
+        this.logger.log(`Activated previously inactive user ${user.id} via first successful OTP verification`);
+      }
     } else {
       // Create new global user securely
       user = await this.prisma.user.create({
@@ -380,11 +397,20 @@ export class AuthService {
       });
     }
 
-    return this.handlePostLogin(
+    const result = await this.handlePostLogin(
       user,
       type === 'EMAIL' ? normalizedIdentifier : undefined,
       meta,
     );
+
+    // If the user's primary auth identity doesn't have a password set, prompt frontend
+    const hasPassword = identity ? !!identity.secret : false;
+
+    return {
+      ...result,
+      isFirstLogin,
+      needsPasswordSetup: !hasPassword,
+    };
   }
 
   // ==========================
