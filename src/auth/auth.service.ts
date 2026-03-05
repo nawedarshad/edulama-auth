@@ -491,7 +491,7 @@ export class AuthService {
       const tokens = await this.generateTokens(
         user.id,
         selectedSchoolId,
-        user.roleId || (primaryMembership?.roleId),
+        user.roleId || selectedRoleId,
         email,
         selectedRole,
         resolvedSubdomain,
@@ -686,7 +686,7 @@ export class AuthService {
 
     // Resolve active role — prefer primaryRole, fall back to first assigned role
     const activeRole = membership.primaryRole ?? membership.roles?.[0]?.role;
-    const activeRoleId = membership.primaryRoleId ?? membership.roles?.[0]?.roleId;
+    const activeRoleId = membership.primaryRoleId || (membership.roles?.length > 0 ? membership.roles[0].roleId : null);
     const allRoles = membership.roles?.map((r: any) => ({ id: r.role?.id, name: r.role?.name })).filter(Boolean) ?? [];
 
     if (!activeRole || !activeRoleId) {

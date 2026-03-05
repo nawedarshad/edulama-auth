@@ -1,0 +1,452 @@
+// ==========================
+// ENUMS
+// ==========================
+
+enum AuthType {
+  GOOGLE
+  EMAIL
+  PHONE
+  USERNAME
+}
+
+enum UiFeatureType {
+  MENU
+  PAGE
+  ACTION
+}
+
+enum AcademicYearStatus {
+  PLANNED
+  ACTIVE
+  CLOSED
+  ARCHIVED
+}
+
+// ==========================
+// TENANT (SCHOOL)
+// ==========================
+
+enum SchoolType {
+  SCHOOL
+  COLLEGE
+  COACHING
+}
+
+model School {
+  id        Int        @id @default(autoincrement())
+  name      String
+  code      String     @unique // mobile login
+  subdomain String     @unique // web login
+  type      SchoolType @default(SCHOOL)
+  isActive  Boolean    @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  users                   User[]
+  academicYears           AcademicYear[]
+  authIdentities          AuthIdentity[]
+  schoolModules           SchoolModule[]
+  announcements           Announcement[]
+  announcementAudiences   AnnouncementAudience[]
+  announcementAttachments AnnouncementAttachment[]
+  announcementAcks        AnnouncementAck[]
+  workingPatterns         WorkingPattern[]
+  calendarExceptions      CalendarException[]
+  attendanceSessions      AttendanceSession[]
+  attendances             Attendance[]
+  attendanceSummaries     AttendanceSummary[]
+  staffAttendances        StaffAttendance[]
+  classSubjects           ClassSubject[]
+  classes                 Class[]
+  sections                Section[]
+  classHeadTeachers       ClassHeadTeacher[]
+  sectionTeachers         SectionTeacher[]
+  incidentReports         IncidentReport[]
+  todos                   Todo[]
+  schoolSettings          SchoolSettings?
+
+  leaveTypes    LeaveType[]
+  leaveRequests LeaveRequest[]
+
+  timeSlots          TimeSlot[]
+  classDiaries       ClassDiary[]
+  syllabi            Syllabus[]
+  houses             House[]
+  auditLogs          AuditLog[]
+  notifications      Notification[]
+  rooms              Room[]
+  roomAssignments    RoomAssignment[]
+  grievances         Grievance[]
+  teacherProfiles    TeacherProfile[]
+  studentProfiles    StudentProfile[]
+  subjectAssignments SubjectAssignment[]
+  timePeriods        TimePeriod[]
+  departments        Department[]
+  subjects           Subject[]
+  subjectCategories  SubjectCategory[]
+  timetableEntries   TimetableEntry[]
+  timetableOverrides TimetableOverride[]
+  schedules          Schedule[]
+
+  grievanceConfigs       GrievanceConfig[]
+  notices                Notice[]
+  attendanceConfigs      AttendanceConfig[]
+  lateAttendanceMonitors LateAttendanceMonitor[]
+  exams                  Exam[]
+  examSchedules          ExamSchedule[]
+  seatingArrangements    SeatingArrangement[]
+  invigilatorAssignments InvigilatorAssignment[]
+  questionPapers         QuestionPaper[]
+  examResults            ExamResult[]
+  webPages               WebPage[]
+  inquiries              Inquiry[]
+  examRoomTemplates      ExamRoomTemplate[]
+  userSchools            UserSchool[]
+  salaryConfigs          SalaryConfig[]
+  payrolls               Payroll[]
+
+  @@index([code])
+  @@index([subdomain])
+}
+
+// ==========================
+// ACADEMIC YEAR
+// ==========================
+
+model AcademicYear {
+  id        Int                @id @default(autoincrement())
+  schoolId  Int
+  name      String
+  startDate DateTime           @default(now()) @db.Date
+  endDate   DateTime           @default(now()) @db.Date
+  status    AcademicYearStatus @default(PLANNED)
+
+  createdAt DateTime @default(now())
+
+  school              School              @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  workingPatterns     WorkingPattern[]
+  calendarExceptions  CalendarException[]
+  attendanceSessions  AttendanceSession[]
+  attendanceSummaries AttendanceSummary[]
+  staffAttendances    StaffAttendance[]
+  classSubjects       ClassSubject[]
+  classes             Class[]
+  sections            Section[]
+  classHeadTeachers   ClassHeadTeacher[]
+  sectionTeachers     SectionTeacher[]
+  incidentReports     IncidentReport[]
+  classDiaries        ClassDiary[]
+  syllabi             Syllabus[]
+  roomAssignments     RoomAssignment[]
+  grievances          Grievance[]
+  studentProfiles     StudentProfile[]
+  subjectAssignments  SubjectAssignment[]
+  timetableEntries    TimetableEntry[]
+  timetableOverrides  TimetableOverride[]
+  timeSlots           TimeSlot[]
+  timePeriods         TimePeriod[]
+  teacherAppraisals   TeacherAppraisal[]
+  subjects            Subject[]
+  schedules           Schedule[]
+
+  leaveRequests          LeaveRequest[]
+  announcements          Announcement[]
+  notices                Notice[]
+  attendanceConfigs      AttendanceConfig[]
+  lateAttendanceMonitors LateAttendanceMonitor[]
+  exams                  Exam[]
+  examSchedules          ExamSchedule[]
+  seatingArrangements    SeatingArrangement[]
+  invigilatorAssignments InvigilatorAssignment[]
+  questionPapers         QuestionPaper[]
+  examResults            ExamResult[]
+  examRoomTemplates      ExamRoomTemplate[]
+
+  @@unique([schoolId, name])
+  @@index([schoolId])
+}
+
+// ==========================
+// USER (PURE IDENTITY)
+// ==========================
+
+model User {
+  id           Int       @id @default(autoincrement())
+  name         String
+  photo        String?
+  isActive     Boolean   @default(true)
+  lastSeen     DateTime?
+  deviceToken  String?
+  tokenVersion Int       @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  userSchools UserSchool[]
+
+  grievancesRaised             Grievance[]
+  grievancesResolved           Grievance[]           @relation("GrievanceResolvedBy")
+  grievancesAgainst            Grievance[]           @relation("GrievanceAgainstUser")
+  uploadedGrievanceAttachments GrievanceAttachment[]
+
+  // Back-relations for IncidentReport
+  createdIncidents  IncidentReport[] @relation("CreatedIncidents")
+  resolvedIncidents IncidentReport[] @relation("ResolvedIncidents")
+
+  // Back-relation for Attendance (late marking only)
+  lateMarkedAttendances Attendance[] @relation("LateMarkedBy")
+
+  // Note: Removed 'attendances Attendance[]' as it lacks an opposite relation on Attendance
+  announcements           Announcement[]
+  announcementAttachments AnnouncementAttachment[]
+  announcementAcks        AnnouncementAck[]
+  attendanceSessions      AttendanceSession[]
+  incidentAttachments     IncidentAttachment[]
+  todos                   Todo[]
+  // classDiaries            ClassDiary[] // Moved to TeacherProfile
+  auditLogs               AuditLog[]
+  notifications           Notification[]
+  notificationDeliveries  NotificationDelivery[]
+  notificationPreference  NotificationPreference?
+  parentProfile           ParentProfile?
+  teacherProfile          TeacherProfile?
+  studentProfile          StudentProfile?
+  timetableOverrides      TimetableOverride[]
+  publishedTimetables     TimetableEntry[]         @relation("TimetablePublisher")
+  authIdentities          AuthIdentity[]
+  passwordResets          PasswordReset[]
+  authTokens              AuthToken[]
+
+  leaveRequests              LeaveRequest[] @relation("LeaveApplicant")
+  reviewedLeaves             LeaveRequest[] @relation("LeaveApprover")
+  classTeacherApprovedLeaves LeaveRequest[] @relation("ClassTeacherApprover")
+
+  userRoles       UserRole[]
+  userPermissions UserPermission[]
+
+  // Department relations
+  departmentHeadOf      Department[]       @relation("HeadOfDepartment")
+  departmentMemberships DepartmentMember[]
+
+  schoolAdminScopes SchoolAdminScope[]
+  school            School?            @relation(fields: [schoolId], references: [id])
+  schoolId          Int?
+  role              Role?              @relation(fields: [roleId], references: [id])
+  roleId            Int?
+}
+
+// ==========================
+// AUTH IDENTITY (LOGIN METHODS)
+// ==========================
+
+model AuthIdentity {
+  id       Int      @id @default(autoincrement())
+  userId   Int
+  type     AuthType
+  value    String
+  secret   String?
+  verified Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  school   School? @relation(fields: [schoolId], references: [id])
+  schoolId Int?
+
+  @@unique([type, value])
+  @@index([type, value])
+}
+
+// ==========================
+// USER SCHOOL (TENANT MEMBERSHIP)
+// ==========================
+
+model UserSchool {
+  id       Int     @id @default(autoincrement())
+  userId   Int
+  schoolId Int
+  roleId   Int
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id])
+
+  @@unique([userId, schoolId])
+  @@index([userId])
+  @@index([schoolId])
+}
+
+// ==========================
+// OTP VERIFICATION (TEMPORARY STATE)
+// ==========================
+
+model OtpVerification {
+  id        Int      @id @default(autoincrement())
+  type      AuthType // EMAIL or PHONE
+  value     String // The email or phone number
+  otpHash   String // Hashed OTP value
+  attempts  Int      @default(0)
+  expiresAt DateTime
+  ip        String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([type, value])
+  @@index([type, value])
+}
+
+// ==========================
+// PASSWORD RESET (TENANT SAFE)
+// ==========================
+
+model PasswordReset {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  schoolId  Int
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId])
+}
+
+// ==========================
+// AUTH TOKEN
+// ==========================
+
+model AuthToken {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  schoolId  Int?
+  roleId    Int?
+  ip        String?
+  userAgent String?
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ==========================
+// ROLES & PERMISSIONS (UNCHANGED)
+// ==========================
+
+model Role {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+
+  users                 User[]
+  userRoles             UserRole[]
+  rolePermissions       RolePermission[]
+  announcementAudiences AnnouncementAudience[]
+  uiFeatureRoles        UiFeatureRole[]
+  grievanceConfigs      GrievanceConfig[]
+  userSchools           UserSchool[]
+}
+
+model UserRole {
+  userId Int
+  roleId Int
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id])
+
+  @@id([userId, roleId])
+}
+
+model Permission {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+
+  rolePermissions RolePermission[]
+  userPermissions UserPermission[]
+}
+
+model UserPermission {
+  userId       Int
+  permissionId Int
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+}
+
+model RolePermission {
+  id           Int @id @default(autoincrement())
+  roleId       Int
+  permissionId Int
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@unique([roleId, permissionId])
+}
+
+// ==========================
+// FEATURE FLAGS
+// ==========================
+
+model Module {
+  id            Int            @id @default(autoincrement())
+  key           String         @unique // ATTENDANCE, FEES, EVENTS, EXAMS
+  name          String         @default("")
+  description   String?
+  schoolModules SchoolModule[]
+}
+
+model SchoolModule {
+  id       Int     @id @default(autoincrement())
+  schoolId Int
+  moduleId Int
+  enabled  Boolean @default(false)
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  module Module @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([schoolId, moduleId])
+}
+
+model UiFeature {
+  id Int @id @default(autoincrement())
+
+  key  String        @unique // ATTENDANCE_VIEW, FEES_EDIT
+  name String
+  type UiFeatureType
+
+  path String?
+  icon String?
+  api  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  roles UiFeatureRole[]
+}
+
+model UiFeatureRole {
+  id          Int @id @default(autoincrement())
+  roleId      Int
+  uiFeatureId Int
+
+  role      Role      @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  uiFeature UiFeature @relation(fields: [uiFeatureId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, uiFeatureId])
+}
