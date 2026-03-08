@@ -5,11 +5,13 @@ import {
   Body,
   UseGuards,
   Req,
+  Res,
   UnauthorizedException,
   Headers,
   Query,
   Ip,
 } from '@nestjs/common';
+
 import { AuthService } from './auth.service';
 import { GoogleAuthGuard } from './google-auth.guard';
 import { JwtAuthGuard } from './jwt/jwt.guard';
@@ -92,13 +94,50 @@ export class AuthController {
 
   @Get('google/callback')
   @UseGuards(GoogleAuthGuard)
-  async googleAuthRedirect(@Req() req, @Ip() ip: string, @Headers('user-agent') ua: string) {
+  async googleAuthRedirect(@Req() req, @Res() res, @Ip() ip: string, @Headers('user-agent') ua: string) {
     if (!req.user) {
       throw new UnauthorizedException('Google authentication failed');
     }
 
-    return this.authService.validateGoogleUser(req.user, { ip, userAgent: ua });
+    const result = await this.authService.validateGoogleUser(req.user, { ip, userAgent: ua }) as any;
+
+    // Detect if this came from the mobile app via the state param
+    let oauthState: any = {};
+    try {
+      const rawState = req.query.state || req.user?.oauthState;
+      if (rawState && typeof rawState === 'string') {
+        oauthState = JSON.parse(rawState);
+      } else if (req.user?.oauthState) {
+        oauthState = req.user.oauthState;
+      }
+    } catch { }
+
+    const isMobile = oauthState?.platform === 'mobile';
+    const mobileRedirect = oauthState?.mobileRedirect || 'edulama://auth/callback';
+
+    if (isMobile) {
+      // Build the mobile deep-link with tokens as query params
+      const params = new URLSearchParams();
+      params.set('accessToken', result.accessToken || '');
+      params.set('refreshToken', result.refreshToken || '');
+      if (result.user?.id) params.set('userId', String(result.user.id));
+      if (result.user?.name) params.set('name', result.user.name);
+      if (result.user?.role) params.set('role', result.user.role);
+      if (result.school?.id) params.set('schoolId', String(result.school.id));
+      if (result.school?.subdomain) params.set('subdomain', result.school.subdomain);
+      if (result.academicYearId) params.set('academicYearId', String(result.academicYearId));
+      if (result.requireSchoolSelection) params.set('requireSchoolSelection', 'true');
+      if (result.user?.memberships) {
+        params.set('memberships', encodeURIComponent(JSON.stringify(result.user.memberships)));
+      }
+
+      return res.redirect(`${mobileRedirect}?${params.toString()}`);
+    }
+
+    // Web: return JSON as before
+    return res.json(result);
   }
+
 
   @Post('signin')
   async signin(@Body() body: SigninDto, @Ip() ip: string, @Headers('user-agent') ua: string) {
