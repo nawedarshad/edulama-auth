@@ -130,6 +130,9 @@ export class AuthController {
       if (result.user?.memberships) {
         params.set('memberships', encodeURIComponent(JSON.stringify(result.user.memberships)));
       }
+      if (result.modules) {
+        params.set('modules', encodeURIComponent(JSON.stringify(result.modules)));
+      }
 
       return res.redirect(`${mobileRedirect}?${params.toString()}`);
     }

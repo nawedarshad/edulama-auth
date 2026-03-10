@@ -192,6 +192,7 @@ export class AuthService {
     return {
       accessToken,
       refreshToken: rawRefreshToken,
+      modules: enabledModules,
     };
   }
 
