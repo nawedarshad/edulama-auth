@@ -825,7 +825,7 @@ export class AuthService {
     this.logger.log(`Tokens revoked for user ${userId}`);
   }
 
-  async changePassword(userId: number, oldPassword?: string, newPassword: string) {
+  async changePassword(userId: number, newPassword: string, oldPassword?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       include: { authIdentities: { where: { type: AuthType.EMAIL } } },
@@ -839,7 +839,7 @@ export class AuthService {
     }
 
     // If password was already changed, we REQUIRE oldPassword
-    if (user.passwordChanged) {
+    if ((user as any).passwordChanged) {
       if (!oldPassword) {
         throw new BadRequestException('Old password is required');
       }
@@ -862,7 +862,7 @@ export class AuthService {
           passwordChanged: true,
           passwordLastChanged: new Date(),
           tokenVersion: { increment: 1 }, // Revoke tokens
-        },
+        } as any,
       }),
     ]);
 
