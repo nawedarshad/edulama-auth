@@ -69,6 +69,16 @@ class RefreshDto {
   refreshToken: string;
 }
 
+class ChangePasswordDto {
+  @IsOptional()
+  @IsString()
+  oldPassword?: string;
+
+  @IsString()
+  @IsNotEmpty()
+  newPassword: string;
+}
+
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) { }
@@ -209,5 +219,15 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   async getProfile(@Req() req) {
     return { user: await this.authService.getMe(req.user) };
+  }
+
+  @Post('change-password')
+  @UseGuards(JwtAuthGuard)
+  async changePassword(@Req() req, @Body() body: ChangePasswordDto) {
+    return this.authService.changePassword(
+      req.user.sub,
+      body.oldPassword,
+      body.newPassword,
+    );
   }
 }

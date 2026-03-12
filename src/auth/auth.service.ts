@@ -824,4 +824,49 @@ export class AuthService {
     });
     this.logger.log(`Tokens revoked for user ${userId}`);
   }
+
+  async changePassword(userId: number, oldPassword?: string, newPassword: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { authIdentities: { where: { type: AuthType.EMAIL } } },
+    });
+
+    if (!user) throw new BadRequestException('User not found');
+
+    const identity = user.authIdentities[0];
+    if (!identity || !identity.secret) {
+      throw new BadRequestException('Local password identity not found for this user');
+    }
+
+    // If password was already changed, we REQUIRE oldPassword
+    if (user.passwordChanged) {
+      if (!oldPassword) {
+        throw new BadRequestException('Old password is required');
+      }
+      const isPasswordValid = await argon2.verify(identity.secret, oldPassword);
+      if (!isPasswordValid) {
+        throw new UnauthorizedException('Invalid old password');
+      }
+    }
+
+    const hashedPassword = await argon2.hash(newPassword);
+
+    await this.prisma.$transaction([
+      this.prisma.authIdentity.update({
+        where: { id: identity.id },
+        data: { secret: hashedPassword },
+      }),
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordChanged: true,
+          passwordLastChanged: new Date(),
+          tokenVersion: { increment: 1 }, // Revoke tokens
+        },
+      }),
+    ]);
+
+    this.logger.log(`Password changed successfully for user: ${userId}`);
+    return { message: 'Password changed successfully' };
+  }
 }
