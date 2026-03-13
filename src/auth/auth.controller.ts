@@ -230,4 +230,11 @@ export class AuthController {
       body.oldPassword,
     );
   }
+
+  @Post('revoke-all-sessions')
+  @UseGuards(JwtAuthGuard)
+  async revokeAllSessions(@Req() req) {
+    await this.authService.revokeAllSessions(req.user.sub);
+    return { message: 'All sessions revoked successfully' };
+  }
 }

@@ -320,7 +320,25 @@ export class AuthService {
     type: 'EMAIL' | 'PHONE',
     meta?: { ip?: string; userAgent?: string },
   ) {
-    return this.otpService.generateAndSendOtp(identifier, AuthType[type], meta);
+    const normalizedIdentifier = identifier.toLowerCase().trim();
+
+    // 1. Check if identity exists and user is active
+    const identity = await this.prisma.authIdentity.findUnique({
+      where: { type_value: { type: AuthType[type], value: normalizedIdentifier } },
+      include: { user: true },
+    });
+
+    if (!identity) {
+      this.logger.warn(`OTP request for non-existent ${type}: ${this.maskIdentifier(normalizedIdentifier)}`);
+      throw new BadRequestException('User not found. Please contact your administrator.');
+    }
+
+    if (!identity.user.isActive) {
+      this.logger.warn(`OTP request for inactive user: ${identity.userId} (${this.maskIdentifier(normalizedIdentifier)})`);
+      throw new BadRequestException('Your account is inactive. Please contact your administrator.');
+    }
+
+    return this.otpService.generateAndSendOtp(normalizedIdentifier, AuthType[type], meta);
   }
 
   async verifyOtpAndLogin(
@@ -823,6 +841,14 @@ export class AuthService {
       data: { tokenVersion: { increment: 1 } },
     });
     this.logger.log(`Tokens revoked for user ${userId}`);
+  }
+
+  async revokeAllSessions(userId: number) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { tokenVersion: { increment: 1 } },
+    });
+    this.logger.log(`All sessions revoked for user ${userId}`);
   }
 
   async changePassword(userId: number, newPassword: string, oldPassword?: string) {
