@@ -689,21 +689,27 @@ export class AuthService {
     const normalizedUsername = username.toLowerCase().trim();
     const normalizedSchoolCode = schoolCode.toLowerCase().trim();
 
-    // 1. Find school (case-insensitive)
-    const school = await this.prisma.school.findFirst({
+    // 1. Find school (try code first, then subdomain as fallback)
+    let school = await this.prisma.school.findFirst({
       where: { code: { equals: normalizedSchoolCode, mode: 'insensitive' } },
     });
 
     if (!school) {
-      throw new UnauthorizedException('Invalid school code');
+      school = await this.prisma.school.findFirst({
+        where: { subdomain: { equals: normalizedSchoolCode, mode: 'insensitive' } },
+      });
     }
 
-    // 2. Find identity for this school and username (convention: username@schoolcode)
-    const identity = await this.prisma.authIdentity.findUnique({
+    if (!school) {
+      throw new UnauthorizedException(`School with code "${schoolCode}" not found.`);
+    }
+
+    // 2. Find identity (Try new convention: username@schoolcode, fall back to legacy if unique)
+    let identity = await this.prisma.authIdentity.findUnique({
       where: {
         type_value: {
           type: AuthType.USERNAME,
-          value: `${normalizedUsername}@${normalizedSchoolCode}`,
+          value: `${normalizedUsername}@${school.code.toLowerCase()}`,
         },
       },
       include: {
@@ -719,6 +725,39 @@ export class AuthService {
         },
       },
     });
+
+    if (!identity) {
+      // Fallback: Try finding by username only (legacy identities)
+      identity = await this.prisma.authIdentity.findUnique({
+        where: {
+          type_value: {
+            type: AuthType.USERNAME,
+            value: normalizedUsername,
+          },
+        },
+        include: {
+          user: {
+            include: {
+              userSchools: {
+                where: { schoolId: school.id },
+                include: { school: true, primaryRole: true, roles: { include: { role: true } } },
+              },
+              school: true,
+              role: true,
+            },
+          },
+        },
+      });
+
+      // Verification: If found via legacy format, verify it belongs to the school
+      // or has a membership in that school.
+      const hasMembership = (identity?.user?.userSchools?.length ?? 0) > 0;
+      if (identity && identity.schoolId && identity.schoolId !== school.id) {
+        identity = null;
+      } else if (identity && !hasMembership) {
+        identity = null;
+      }
+    }
 
     if (!identity) {
       throw new UnauthorizedException('Invalid username or school code');
