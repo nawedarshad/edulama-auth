@@ -689,9 +689,9 @@ export class AuthService {
     const normalizedUsername = username.toLowerCase().trim();
     const normalizedSchoolCode = schoolCode.toLowerCase().trim();
 
-    // 1. Find school
-    const school = await this.prisma.school.findUnique({
-      where: { code: normalizedSchoolCode },
+    // 1. Find school (case-insensitive)
+    const school = await this.prisma.school.findFirst({
+      where: { code: { equals: normalizedSchoolCode, mode: 'insensitive' } },
     });
 
     if (!school) {
