@@ -32,6 +32,20 @@ class SigninDto {
   schoolCode?: string;
 }
 
+class StudentSigninDto {
+  @IsString()
+  @IsNotEmpty()
+  username: string;
+
+  @IsString()
+  @IsNotEmpty()
+  password?: string;
+
+  @IsString()
+  @IsNotEmpty()
+  schoolCode: string;
+}
+
 
 
 class OtpRequestDto {
@@ -155,6 +169,14 @@ export class AuthController {
   @Post('signin')
   async signin(@Body() body: SigninDto, @Ip() ip: string, @Headers('user-agent') ua: string) {
     return this.authService.signin(body.email, body.password, body.schoolCode, {
+      ip,
+      userAgent: ua,
+    });
+  }
+
+  @Post('student/signin')
+  async studentSignin(@Body() body: StudentSigninDto, @Ip() ip: string, @Headers('user-agent') ua: string) {
+    return this.authService.studentSignin(body.username, body.schoolCode, body.password, {
       ip,
       userAgent: ua,
     });

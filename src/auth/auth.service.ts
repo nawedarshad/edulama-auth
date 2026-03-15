@@ -680,6 +680,84 @@ export class AuthService {
     return this.handlePostLogin(identity.user, email, meta);
   }
 
+  async studentSignin(
+    username: string,
+    schoolCode: string,
+    password?: string,
+    meta?: { ip?: string; userAgent?: string },
+  ) {
+    const normalizedUsername = username.toLowerCase().trim();
+    const normalizedSchoolCode = schoolCode.toLowerCase().trim();
+
+    // 1. Find school
+    const school = await this.prisma.school.findUnique({
+      where: { code: normalizedSchoolCode },
+    });
+
+    if (!school) {
+      throw new UnauthorizedException('Invalid school code');
+    }
+
+    // 2. Find identity for this school and username (convention: username@schoolcode)
+    const identity = await this.prisma.authIdentity.findUnique({
+      where: {
+        type_value: {
+          type: AuthType.USERNAME,
+          value: `${normalizedUsername}@${normalizedSchoolCode}`,
+        },
+      },
+      include: {
+        user: {
+          include: {
+            userSchools: {
+              where: { schoolId: school.id },
+              include: { school: true, primaryRole: true, roles: { include: { role: true } } },
+            },
+            school: true,
+            role: true,
+          },
+        },
+      },
+    });
+
+    if (!identity) {
+      throw new UnauthorizedException('Invalid username or school code');
+    }
+
+    // 3. Verify password
+    if (!password) {
+      throw new UnauthorizedException('Password is required');
+    }
+
+    if (identity.secret) {
+      const isHashed = identity.secret.startsWith('$argon2');
+      let isPasswordValid = false;
+
+      if (isHashed) {
+        isPasswordValid = await argon2.verify(identity.secret, password);
+      } else {
+        // Migration logic: Handle plain text passwords
+        isPasswordValid = identity.secret === password;
+        if (isPasswordValid) {
+          const newHash = await argon2.hash(password);
+          await this.prisma.authIdentity.update({
+            where: { id: identity.id },
+            data: { secret: newHash },
+          });
+        }
+      }
+
+      if (!isPasswordValid) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+    } else {
+      throw new UnauthorizedException('No password set for this account');
+    }
+
+    // 4. Handle login
+    return this.handlePostLogin(identity.user, undefined, meta);
+  }
+
   // ==========================
   // SCHOOL SELECTION
   // ==========================
