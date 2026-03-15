@@ -704,13 +704,12 @@ export class AuthService {
       throw new UnauthorizedException(`School with code "${schoolCode}" not found.`);
     }
 
-    // 2. Find identity (Try new convention: username@schoolcode, fall back to legacy if unique)
-    let identity = await this.prisma.authIdentity.findUnique({
+    // 2. Find identity (School-scoped username)
+    const identity = await this.prisma.authIdentity.findFirst({
       where: {
-        type_value: {
-          type: AuthType.USERNAME,
-          value: `${normalizedUsername}@${school.code.toLowerCase()}`,
-        },
+        schoolId: school.id,
+        type: AuthType.USERNAME,
+        value: normalizedUsername,
       },
       include: {
         user: {
@@ -725,39 +724,6 @@ export class AuthService {
         },
       },
     });
-
-    if (!identity) {
-      // Fallback: Try finding by username only (legacy identities)
-      identity = await this.prisma.authIdentity.findUnique({
-        where: {
-          type_value: {
-            type: AuthType.USERNAME,
-            value: normalizedUsername,
-          },
-        },
-        include: {
-          user: {
-            include: {
-              userSchools: {
-                where: { schoolId: school.id },
-                include: { school: true, primaryRole: true, roles: { include: { role: true } } },
-              },
-              school: true,
-              role: true,
-            },
-          },
-        },
-      });
-
-      // Verification: If found via legacy format, verify it belongs to the school
-      // or has a membership in that school.
-      const hasMembership = (identity?.user?.userSchools?.length ?? 0) > 0;
-      if (identity && identity.schoolId && identity.schoolId !== school.id) {
-        identity = null;
-      } else if (identity && !hasMembership) {
-        identity = null;
-      }
-    }
 
     if (!identity) {
       throw new UnauthorizedException('Invalid username or school code');
